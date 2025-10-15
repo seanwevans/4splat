@@ -6,8 +6,7 @@
 │ (x, y, z, frame). Pixels across all frames are compressed into the      │
 │ global color palette, and each pixel stores an index into this          │
 │ palette. All values are little-endian and indices are row-major order:  │
-│ t-major -> z-major -> y-major -> x-major. All floats are IEEE-754       │
-│ single precision.                                                       │
+│ t-major -> z-major -> y-major -> x-major.                               │
 ╰─────────────────────────────────────────────────────────────────────────╯
 
   ╭ Binary Layout ╮
