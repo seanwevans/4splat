@@ -1,0 +1,2 @@
+autofix_prs: true
+autofix_commit_msg: "chore: reformat"
