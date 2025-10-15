@@ -8,15 +8,40 @@ jobs:
   formatting:
     name: Pre-commit formatting
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
       - name: Install pre-commit
         run: pip install pre-commit
       - name: Run pre-commit
-        run: pre-commit run --all-files --show-diff-on-failure
+        run: |
+          set -eo pipefail
+          status=0
+          pre-commit run --all-files --show-diff-on-failure || status=$?
+          if [ "$status" -gt 1 ]; then
+            exit "$status"
+          fi
+          if [ "$status" -eq 1 ] && git diff --quiet; then
+            exit 1
+          fi
+      - name: Commit and push changes
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: apply pre-commit formatting"
+          git push
 
   build:
     name: Build with warnings enabled
