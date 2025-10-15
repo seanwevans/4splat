@@ -165,8 +165,7 @@
 #include <string.h>
 
 typedef struct {
-  float mu_x, sigma_x, mu_y, sigma_y, mu_z, sigma_z, mu_t, sigma_t, r, g, b,
-      alpha;
+  float mu_x, sigma_x, mu_y, sigma_y, mu_z, sigma_z, mu_t, sigma_t, r, g, b, alpha;
 } Splat4D;
 
 typedef struct {
@@ -228,15 +227,13 @@ static inline void crc32_update(crc32_t *c, const void *p, size_t n) {
 static inline uint32_t crc32_final(crc32_t *c) { return ~c->v; }
 
 uint64_t header_total_indices(const Splat4DHeader *h) {
-  return (uint64_t)h->width * (uint64_t)h->height * (uint64_t)h->depth *
-         (uint64_t)h->frames;
+  return (uint64_t)h->width * (uint64_t)h->height * (uint64_t)h->depth * (uint64_t)h->frames;
 }
 
 uint32_t compute_video_checksum(const Splat4DVideo *v) {
   uint64_t total = header_total_indices(&v->header);
-  size_t total_bytes = sizeof(Splat4DHeader) +
-                       v->header.pSize * sizeof(Splat4D) +
-                       total * sizeof(uint64_t);
+  size_t total_bytes =
+      sizeof(Splat4DHeader) + v->header.pSize * sizeof(Splat4D) + total * sizeof(uint64_t);
 
   // Allocate a temporary contiguous buffer
   uint8_t *buf = malloc(total_bytes);
@@ -269,26 +266,22 @@ uint32_t compute_idxoffset_reverse(const Splat4DHeader *h) {
   return filesize - (sizeof(Splat4DFooter) + total * sizeof(uint64_t));
 }
 
-bool sanity_check_idxoffset_file(FILE *fp, const Splat4DHeader *h,
-                                 const Splat4DFooter *f) {
-  (void)fp;
-  uint64_t expect = (uint64_t)sizeof(Splat4DHeader) +
-                    (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
+bool sanity_check_idxoffset_file(FILE *fp, const Splat4DHeader *h, const Splat4DFooter *f) {
+  uint64_t expect =
+      (uint64_t)sizeof(Splat4DHeader) + (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
   return f->idxoffset == expect;
 }
 
-bool check_idxoffset_file(FILE *fp, const Splat4DHeader *h,
-                          const Splat4DFooter *f) {
-  (void)fp;
-  uint64_t after_header = (uint64_t)sizeof(Splat4DHeader) +
-                          (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
+bool check_idxoffset_file(FILE *fp, const Splat4DHeader *h, const Splat4DFooter *f) {
+  uint64_t after_header =
+      (uint64_t)sizeof(Splat4DHeader) + (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
   return after_header == (uint64_t)f->idxoffset;
 }
 
 // splat
-Splat4D create_splat4D(float mu_x, float sigma_x, float mu_y, float sigma_y,
-                       float mu_z, float sigma_z, float mu_t, float sigma_t,
-                       float r, float g, float b, float alpha) {
+Splat4D create_splat4D(float mu_x, float sigma_x, float mu_y, float sigma_y, float mu_z,
+                       float sigma_z, float mu_t, float sigma_t, float r, float g, float b,
+                       float alpha) {
   return (Splat4D){.mu_x = mu_x,
                    .sigma_x = sigma_x,
                    .mu_y = mu_y,
@@ -318,8 +311,7 @@ void print_splat4D(const Splat4D *s, const uint32_t count) {
 }
 
 // header
-Splat4DHeader create_splat4DHeader(uint32_t width, uint32_t height,
-                                   uint32_t depth, uint32_t frames,
+Splat4DHeader create_splat4DHeader(uint32_t width, uint32_t height, uint32_t depth, uint32_t frames,
                                    uint32_t pSize, uint32_t flags) {
   return (Splat4DHeader){.magic = 0x3453504C,
                          .version = {1, 0, 0, 0},
@@ -333,8 +325,8 @@ Splat4DHeader create_splat4DHeader(uint32_t width, uint32_t height,
 
 void print_splat4DHeader(const Splat4DHeader *h) {
   printf("│  magic        0X%-10X │\n", h->magic);
-  printf("│  version      %02d.%02d.%02d-%02d  │\n", h->version[0],
-         h->version[1], h->version[2], h->version[3]);
+  printf("│  version      %02d.%02d.%02d-%02d  │\n", h->version[0], h->version[1], h->version[2],
+         h->version[3]);
   printf("│  width        0X%-10X │\n", h->width);
   printf("│  height       0X%-10X │\n", h->height);
   printf("│  depth        0X%-10X │\n", h->depth);
@@ -358,9 +350,7 @@ bool read_splat4DHeader(FILE *fp, Splat4DHeader *h) {
 }
 
 // palette
-Splat4DPalette create_splat4DPalette(Splat4D *p) {
-  return (Splat4DPalette){.palette = p};
-}
+Splat4DPalette create_splat4DPalette(Splat4D *p) { return (Splat4DPalette){.palette = p}; }
 
 void print_splat4DPalette(const Splat4DVideo *v) {
   if (!v->palette.palette)
@@ -391,9 +381,7 @@ bool read_splat4DPalette(FILE *fp, Splat4DPalette *p, uint32_t count) {
 }
 
 // index
-Splat4DIndex create_splat4DIndex(uint64_t *i) {
-  return (Splat4DIndex){.index = i};
-}
+Splat4DIndex create_splat4DIndex(uint64_t *i) { return (Splat4DIndex){.index = i}; }
 
 void print_splat4DIndex(const Splat4DVideo *v) {
   if (!v->index.index)
@@ -458,8 +446,7 @@ bool read_splat4DFooter(FILE *fp, Splat4DFooter *f) {
 }
 
 // video
-Splat4DVideo create_splat4DVideo(const Splat4DHeader header, Splat4D *splats,
-                                 uint64_t *idxs) {
+Splat4DVideo create_splat4DVideo(const Splat4DHeader header, Splat4D *splats, uint64_t *idxs) {
   Splat4DVideo v = {.header = header,
                     .palette = create_splat4DPalette(splats),
                     .index = create_splat4DIndex(idxs),
@@ -484,8 +471,7 @@ bool write_splat4DVideo(FILE *fp, Splat4DVideo *v) {
 
   // Compute header-derived values
   uint64_t total = header_total_indices(&v->header);
-  v->footer.idxoffset =
-      sizeof(Splat4DHeader) + v->header.pSize * sizeof(Splat4D);
+  v->footer.idxoffset = sizeof(Splat4DHeader) + v->header.pSize * sizeof(Splat4D);
 
   // Write everything but footer first
   // long start_pos = ftell(fp);
@@ -550,22 +536,19 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   if (!buf)
     return false;
   fread(buf, 1, v->footer.idxoffset + total * sizeof(uint64_t), fp);
-  uint32_t recomputed =
-      crc32(buf, v->footer.idxoffset + total * sizeof(uint64_t));
+  uint32_t recomputed = crc32(buf, v->footer.idxoffset + total * sizeof(uint64_t));
   free(buf);
   fseek(fp, current, SEEK_SET);
 
   if (recomputed != v->footer.checksum) {
-    fprintf(stderr, "❌ CRC mismatch: file=0x%08X recomputed=0x%08X\n",
-            v->footer.checksum, recomputed);
+    fprintf(stderr, "❌ CRC mismatch: file=0x%08X recomputed=0x%08X\n", v->footer.checksum,
+            recomputed);
     return false;
   }
 
   // 2. Validate offset consistency
   if (!sanity_check_idxoffset_file(fp, &v->header, &v->footer)) {
-    fprintf(stderr,
-            "❌ Index offset mismatch (footer=%" PRIu64 ", expect=%" PRIu64
-            ")\n",
+    fprintf(stderr, "❌ Index offset mismatch (footer=%" PRIu64 ", expect=%" PRIu64 ")\n",
             (uint64_t)v->footer.idxoffset,
             (uint64_t)sizeof(Splat4DHeader) +
                 (uint64_t)v->header.pSize * (uint64_t)sizeof(Splat4D));
@@ -634,8 +617,8 @@ bool validate_splat4DVideo(const Splat4DVideo *v) {
 
   uint32_t expected = compute_video_checksum(v);
   if (v->footer.checksum != expected) {
-    fprintf(stderr, "❌ Checksum mismatch (got 0x%08X expected 0x%08X)\n",
-            v->footer.checksum, expected);
+    fprintf(stderr, "❌ Checksum mismatch (got 0x%08X expected 0x%08X)\n", v->footer.checksum,
+            expected);
     return false;
   }
 
@@ -664,13 +647,11 @@ int main(void) {
   const uint32_t flags = 0;
   // const uint32_t indicies = 4;
 
-  Splat4DHeader head =
-      create_splat4DHeader(width, height, depth, // width, height, depth
-                           frames, palette_size, // frames, palette size
-                           flags);               // flags
-  Splat4D splats[2] = {
-      create_splat4D(0, 1, 2, 3, 4, 5, 6, 7, 0.5, 0.6, 0.7, 1.0),
-      create_splat4D(1, 1, 2, 2, 3, 3, 4, 4, 0.8, 0.2, 0.1, 0.9)};
+  Splat4DHeader head = create_splat4DHeader(width, height, depth, // width, height, depth
+                                            frames, palette_size, // frames, palette size
+                                            flags);               // flags
+  Splat4D splats[2] = {create_splat4D(0, 1, 2, 3, 4, 5, 6, 7, 0.5, 0.6, 0.7, 1.0),
+                       create_splat4D(1, 1, 2, 2, 3, 3, 4, 4, 0.8, 0.2, 0.1, 0.9)};
   uint64_t idxs[4] = {0, 1, 0, 1};
   Splat4DVideo video = create_splat4DVideo(head, splats, idxs);
 
