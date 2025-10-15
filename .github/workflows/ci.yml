@@ -25,3 +25,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build project
         run: gcc -Wall -Wpedantic -std=c11 -o 4splat 4splat.c
+      - name: Build tests
+        run: gcc -Wall -Wpedantic -std=c11 -DUNIT_TEST -o tests/test_4splat tests/test_4splat.c
+      - name: Run tests
+        run: ./tests/test_4splat
