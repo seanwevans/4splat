@@ -636,6 +636,7 @@ void free_splat4DVideo(Splat4DVideo *v) {
   v->index.index = NULL;
 }
 
+#ifndef UNIT_TEST
 // main
 int main(void) {
   const uint32_t width = 2;
@@ -674,3 +675,4 @@ int main(void) {
 
   return 0;
 }
+#endif // UNIT_TEST
