@@ -16,14 +16,12 @@ typedef struct {
 
 static Splat4DHeader make_header(void) {
   return create_splat4DHeader(/*width=*/2, /*height=*/2, /*depth=*/1,
-                               /*frames=*/1, /*pSize=*/2, /*flags=*/0);
+                              /*frames=*/1, /*pSize=*/2, /*flags=*/0);
 }
 
 static void make_palette(Splat4D palette[2]) {
-  palette[0] =
-      create_splat4D(0, 1, 2, 3, 4, 5, 6, 7, 0.5f, 0.6f, 0.7f, 1.0f);
-  palette[1] =
-      create_splat4D(1, 1, 2, 2, 3, 3, 4, 4, 0.8f, 0.2f, 0.1f, 0.9f);
+  palette[0] = create_splat4D(0, 1, 2, 3, 4, 5, 6, 7, 0.5f, 0.6f, 0.7f, 1.0f);
+  palette[1] = create_splat4D(1, 1, 2, 2, 3, 3, 4, 4, 0.8f, 0.2f, 0.1f, 0.9f);
 }
 
 static void make_indices(uint64_t indices[4]) {
@@ -112,15 +110,12 @@ static bool test_write_and_read_round_trip(void) {
   if (!read)
     return false;
 
-  bool headers_match = memcmp(&original.header, &loaded.header,
-                              sizeof(Splat4DHeader)) == 0;
+  bool headers_match = memcmp(&original.header, &loaded.header, sizeof(Splat4DHeader)) == 0;
   bool palette_match = memcmp(original.palette.palette, loaded.palette.palette,
                               original.header.pSize * sizeof(Splat4D)) == 0;
   bool index_match = memcmp(original.index.index, loaded.index.index,
-                            header_total_indices(&original.header) *
-                                sizeof(uint64_t)) == 0;
-  bool footer_match = memcmp(&original.footer, &loaded.footer,
-                             sizeof(Splat4DFooter)) == 0;
+                            header_total_indices(&original.header) * sizeof(uint64_t)) == 0;
+  bool footer_match = memcmp(&original.footer, &loaded.footer, sizeof(Splat4DFooter)) == 0;
 
   free_splat4DVideo(&loaded);
 
