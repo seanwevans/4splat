@@ -75,9 +75,7 @@ static bool test_validate_fails_for_bad_checksum(void) {
   return !validate_splat4DVideo(&video);
 }
 
-static bool test_validate_fails_for_null_video(void) {
-  return !validate_splat4DVideo(NULL);
-}
+static bool test_validate_fails_for_null_video(void) { return !validate_splat4DVideo(NULL); }
 
 static bool test_validate_fails_for_bad_magic(void) {
   Splat4D palette[2];
