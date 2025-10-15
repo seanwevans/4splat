@@ -271,6 +271,7 @@ uint32_t compute_idxoffset_reverse(const Splat4DHeader *h) {
 
 bool sanity_check_idxoffset_file(FILE *fp, const Splat4DHeader *h,
                                  const Splat4DFooter *f) {
+  (void)fp;
   uint64_t expect = (uint64_t)sizeof(Splat4DHeader) +
                     (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
   return f->idxoffset == expect;
@@ -278,6 +279,7 @@ bool sanity_check_idxoffset_file(FILE *fp, const Splat4DHeader *h,
 
 bool check_idxoffset_file(FILE *fp, const Splat4DHeader *h,
                           const Splat4DFooter *f) {
+  (void)fp;
   uint64_t after_header = (uint64_t)sizeof(Splat4DHeader) +
                           (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
   return after_header == (uint64_t)f->idxoffset;
@@ -651,6 +653,7 @@ void free_splat4DVideo(Splat4DVideo *v) {
   v->index.index = NULL;
 }
 
+#ifndef UNIT_TEST
 // main
 int main(void) {
   const uint32_t width = 2;
@@ -691,3 +694,4 @@ int main(void) {
 
   return 0;
 }
+#endif // UNIT_TEST
