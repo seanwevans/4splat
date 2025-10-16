@@ -535,61 +535,61 @@ static bool test_header_defaults_to_float32_precision(void) {
 }
 
 static test_case TESTS[] = {
-      {"crc32_known_value", test_crc32_known_value},
-      {"checksum_matches_footer", test_compute_video_checksum_matches_footer},
-      {"idxoffset_helpers_agree", test_idxoffset_helpers_agree},
-      {"validate_succeeds_for_valid_video", test_validate_succeeds_for_valid_video},
-      {"validate_fails_for_bad_checksum", test_validate_fails_for_bad_checksum},
-      {"validate_fails_for_null_video", test_validate_fails_for_null_video},
-      {"validate_fails_for_bad_magic", test_validate_fails_for_bad_magic},
-      {"validate_fails_for_bad_version", test_validate_fails_for_bad_version},
-      {"validate_fails_for_zero_width", test_validate_fails_for_zero_width},
-      {"validate_fails_for_zero_height", test_validate_fails_for_zero_height},
-      {"validate_fails_for_zero_depth", test_validate_fails_for_zero_depth},
-      {"validate_fails_for_zero_frames", test_validate_fails_for_zero_frames},
-      {"validate_fails_for_zero_palette_size", test_validate_fails_for_zero_palette_size},
-      {"validate_fails_for_bad_footer_marker", test_validate_fails_for_bad_footer_marker},
-      {"validate_fails_for_big_endian_flag", test_validate_fails_for_big_endian_flag},
-      {"validate_fails_for_unsupported_precision", test_validate_fails_for_unsupported_precision},
-      {"validate_detects_corrupted_index", test_validate_detects_corrupted_index},
-      {"write_and_read_round_trip", test_write_and_read_round_trip},
-      {"write_header_rejects_null_fp", test_write_header_rejects_null_fp},
-      {"write_header_rejects_null_header", test_write_header_rejects_null_header},
-      {"read_header_rejects_null_fp", test_read_header_rejects_null_fp},
-      {"read_header_rejects_null_header", test_read_header_rejects_null_header},
-      {"write_palette_rejects_nulls", test_write_palette_rejects_nulls},
-      {"read_palette_rejects_invalid_inputs", test_read_palette_rejects_invalid_inputs},
-      {"read_palette_fails_on_short_file", test_read_palette_fails_on_short_file},
-      {"write_index_rejects_nulls", test_write_index_rejects_nulls},
-      {"read_index_rejects_invalid_inputs", test_read_index_rejects_invalid_inputs},
-      {"read_index_fails_on_short_file", test_read_index_fails_on_short_file},
-      {"write_footer_rejects_nulls", test_write_footer_rejects_nulls},
-      {"read_footer_rejects_nulls", test_read_footer_rejects_nulls},
-      {"read_footer_fails_on_short_file", test_read_footer_fails_on_short_file},
-      {"write_video_rejects_nulls", test_write_video_rejects_nulls},
-      {"read_video_rejects_nulls", test_read_video_rejects_nulls},
-      {"read_video_fails_on_truncated_index", test_read_video_fails_on_truncated_index},
-      {"read_video_fails_on_crc_mismatch", test_read_video_fails_on_crc_mismatch},
-      {"read_video_rejects_big_endian_flag", test_read_video_rejects_big_endian_flag},
-      {"read_video_fails_on_invalid_footer_marker", test_read_video_fails_on_invalid_footer_marker},
-      {"idxoffset_sanity_mismatch", test_idxoffset_sanity_mismatch},
-      {"header_defaults_to_float32_precision", test_header_defaults_to_float32_precision},
-  };
+    {"crc32_known_value", test_crc32_known_value},
+    {"checksum_matches_footer", test_compute_video_checksum_matches_footer},
+    {"idxoffset_helpers_agree", test_idxoffset_helpers_agree},
+    {"validate_succeeds_for_valid_video", test_validate_succeeds_for_valid_video},
+    {"validate_fails_for_bad_checksum", test_validate_fails_for_bad_checksum},
+    {"validate_fails_for_null_video", test_validate_fails_for_null_video},
+    {"validate_fails_for_bad_magic", test_validate_fails_for_bad_magic},
+    {"validate_fails_for_bad_version", test_validate_fails_for_bad_version},
+    {"validate_fails_for_zero_width", test_validate_fails_for_zero_width},
+    {"validate_fails_for_zero_height", test_validate_fails_for_zero_height},
+    {"validate_fails_for_zero_depth", test_validate_fails_for_zero_depth},
+    {"validate_fails_for_zero_frames", test_validate_fails_for_zero_frames},
+    {"validate_fails_for_zero_palette_size", test_validate_fails_for_zero_palette_size},
+    {"validate_fails_for_bad_footer_marker", test_validate_fails_for_bad_footer_marker},
+    {"validate_fails_for_big_endian_flag", test_validate_fails_for_big_endian_flag},
+    {"validate_fails_for_unsupported_precision", test_validate_fails_for_unsupported_precision},
+    {"validate_detects_corrupted_index", test_validate_detects_corrupted_index},
+    {"write_and_read_round_trip", test_write_and_read_round_trip},
+    {"write_header_rejects_null_fp", test_write_header_rejects_null_fp},
+    {"write_header_rejects_null_header", test_write_header_rejects_null_header},
+    {"read_header_rejects_null_fp", test_read_header_rejects_null_fp},
+    {"read_header_rejects_null_header", test_read_header_rejects_null_header},
+    {"write_palette_rejects_nulls", test_write_palette_rejects_nulls},
+    {"read_palette_rejects_invalid_inputs", test_read_palette_rejects_invalid_inputs},
+    {"read_palette_fails_on_short_file", test_read_palette_fails_on_short_file},
+    {"write_index_rejects_nulls", test_write_index_rejects_nulls},
+    {"read_index_rejects_invalid_inputs", test_read_index_rejects_invalid_inputs},
+    {"read_index_fails_on_short_file", test_read_index_fails_on_short_file},
+    {"write_footer_rejects_nulls", test_write_footer_rejects_nulls},
+    {"read_footer_rejects_nulls", test_read_footer_rejects_nulls},
+    {"read_footer_fails_on_short_file", test_read_footer_fails_on_short_file},
+    {"write_video_rejects_nulls", test_write_video_rejects_nulls},
+    {"read_video_rejects_nulls", test_read_video_rejects_nulls},
+    {"read_video_fails_on_truncated_index", test_read_video_fails_on_truncated_index},
+    {"read_video_fails_on_crc_mismatch", test_read_video_fails_on_crc_mismatch},
+    {"read_video_rejects_big_endian_flag", test_read_video_rejects_big_endian_flag},
+    {"read_video_fails_on_invalid_footer_marker", test_read_video_fails_on_invalid_footer_marker},
+    {"idxoffset_sanity_mismatch", test_idxoffset_sanity_mismatch},
+    {"header_defaults_to_float32_precision", test_header_defaults_to_float32_precision},
+};
 
-  int main(void) {
-    size_t failed = 0;
-    for (size_t i = 0; i < ARRAY_SIZE(TESTS); ++i) {
-      bool ok = TESTS[i].func();
-      printf("[%s] %s\n", ok ? "PASS" : "FAIL", TESTS[i].name);
-      if (!ok)
-        failed++;
-    }
-
-    if (failed != 0) {
-      fprintf(stderr, "%zu tests failed\n", failed);
-      return 1;
-    }
-
-    printf("All %zu tests passed\n", ARRAY_SIZE(TESTS));
-    return 0;
+int main(void) {
+  size_t failed = 0;
+  for (size_t i = 0; i < ARRAY_SIZE(TESTS); ++i) {
+    bool ok = TESTS[i].func();
+    printf("[%s] %s\n", ok ? "PASS" : "FAIL", TESTS[i].name);
+    if (!ok)
+      failed++;
   }
+
+  if (failed != 0) {
+    fprintf(stderr, "%zu tests failed\n", failed);
+    return 1;
+  }
+
+  printf("All %zu tests passed\n", ARRAY_SIZE(TESTS));
+  return 0;
+}

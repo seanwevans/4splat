@@ -321,12 +321,10 @@ typedef union {
 
 static inline Splat4DFlags splat4d_flags_from_raw(uint32_t raw) { return raw; }
 
-static inline Splat4DFlags splat4d_flags_make(SplatEndian endian, SplatSortOrder sort_order,
-                                              SplatPrecision precision,
-                                              SplatCompression compression,
-                                              SplatIndexWidth index_width, SplatShape shape,
-                                              SplatColorSpace color_space,
-                                              SplatInterpolation interpolation) {
+static inline Splat4DFlags
+splat4d_flags_make(SplatEndian endian, SplatSortOrder sort_order, SplatPrecision precision,
+                   SplatCompression compression, SplatIndexWidth index_width, SplatShape shape,
+                   SplatColorSpace color_space, SplatInterpolation interpolation) {
   Splat4DFlagsView view = {.raw = 0};
   view.bits.endian = endian;
   view.bits.sorted = sort_order;
@@ -812,15 +810,12 @@ void print_flags(uint32_t flags) {
   print_flag_line(stdout, "endian", endian);
   print_flag_line(stdout, "sorted", sorted);
 
-  print_flag_line(stdout, "precision",
-                  splat_precision_name((SplatPrecision)precision_bits));
+  print_flag_line(stdout, "precision", splat_precision_name((SplatPrecision)precision_bits));
   print_flag_line(stdout, "compression",
                   splat_compression_name((SplatCompression)compression_bits));
-  print_flag_line(stdout, "index width",
-                  splat_index_width_name((SplatIndexWidth)index_width_bits));
+  print_flag_line(stdout, "index width", splat_index_width_name((SplatIndexWidth)index_width_bits));
   print_flag_line(stdout, "splat shape", splat_shape_name((SplatShape)splat_shape_bits));
-  print_flag_line(stdout, "color space",
-                  splat_color_space_name((SplatColorSpace)color_space_bits));
+  print_flag_line(stdout, "color space", splat_color_space_name((SplatColorSpace)color_space_bits));
   print_flag_line(stdout, "interp",
                   splat_interpolation_name((SplatInterpolation)interpolation_bits));
 
@@ -845,8 +840,7 @@ void print_splat4DHeader(const Splat4DHeader *h) {
   Splat4DFlagsView view = {.raw = h->flags};
   printf("│    endian     %-14s │\n", splat_endian_name((SplatEndian)view.bits.endian));
   printf("│    sort       %-14s │\n", splat_sort_order_name((SplatSortOrder)view.bits.sorted));
-  printf("│    precision  %-14s │\n",
-         splat_precision_name((SplatPrecision)view.bits.precision));
+  printf("│    precision  %-14s │\n", splat_precision_name((SplatPrecision)view.bits.precision));
   printf("│    compress   %-14s │\n",
          splat_compression_name((SplatCompression)view.bits.compression));
   printf("│    index      %-14s │\n",
