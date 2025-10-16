@@ -845,7 +845,8 @@ static int command_encode(int argc, char **argv) {
 
   if (!palette_path || !index_path || !output_path || !meta.width_set || !meta.height_set ||
       !meta.depth_set || !meta.frames_set) {
-    fprintf(stderr, "❌ encode requires --palette, --index, --output, --width, --height, --depth, and --frames\n");
+    fprintf(stderr, "❌ encode requires --palette, --index, --output, --width, --height, --depth, "
+                    "and --frames\n");
     return EXIT_FAILURE;
   }
 
@@ -871,8 +872,8 @@ static int command_encode(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  uint64_t expected_indices = (uint64_t)meta.width * (uint64_t)meta.height *
-                              (uint64_t)meta.depth * (uint64_t)meta.frames;
+  uint64_t expected_indices =
+      (uint64_t)meta.width * (uint64_t)meta.height * (uint64_t)meta.depth * (uint64_t)meta.frames;
   if (expected_indices != index_count) {
     fprintf(stderr,
             "❌ Index count mismatch: expected %" PRIu64 " (from dimensions) but file has %" PRIu64
@@ -884,8 +885,7 @@ static int command_encode(int argc, char **argv) {
   }
 
   Splat4DHeader header = create_splat4DHeader(meta.width, meta.height, meta.depth, meta.frames,
-                                              meta.palette_size,
-                                              meta.flags_set ? meta.flags : 0u);
+                                              meta.palette_size, meta.flags_set ? meta.flags : 0u);
   Splat4DVideo video = create_splat4DVideo(header, palette, indices);
 
   FILE *fp = fopen(output_path, "wb");
