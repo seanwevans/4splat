@@ -331,22 +331,14 @@ static const char *precision_name(uint32_t precision) {
 }
 
 static const char *compression_name(uint32_t compression) {
-  static const char *names[] = {"None",
-                                "Run Length Encoding",
-                                "DEFLATE",
-                                "RAR",
-                                "LZO",
-                                "Zlib",
-                                "bzip2",
-                                "LZMA",
-                                "ZPAQ",
-                                "XZ",
-                                "LZ4",
-                                "Snappy",
-                                "LZHAM",
-                                "Brotli",
-                                "LZFSE",
-                                "Zstd"};
+  static const char *names[] = {"None",    "Run Length Encoding",
+                                "DEFLATE", "RAR",
+                                "LZO",     "Zlib",
+                                "bzip2",   "LZMA",
+                                "ZPAQ",    "XZ",
+                                "LZ4",     "Snappy",
+                                "LZHAM",   "Brotli",
+                                "LZFSE",   "Zstd"};
   if (compression < (sizeof names / sizeof names[0]))
     return names[compression];
   return "Reserved";
@@ -367,22 +359,10 @@ static const char *splat_shape_name(uint32_t shape) {
 }
 
 static const char *color_space_name(uint32_t color_space) {
-  static const char *names[] = {"sRGB",
-                                "Linear sRGB",
-                                "OKLab",
-                                "Display P3",
-                                "Rec.709",
-                                "Rec.2020",
-                                "DCI-P3",
-                                "ACES-AP0",
-                                "ProPhoto RGB",
-                                "Rec.2100",
-                                "CIE Lab",
-                                "CIE XYZ D65",
-                                "ACEScg-AP1",
-                                "Rec.601",
-                                "XYZ D50",
-                                "XYZ D65"};
+  static const char *names[] = {"sRGB",         "Linear sRGB", "OKLab",   "Display P3",
+                                "Rec.709",      "Rec.2020",    "DCI-P3",  "ACES-AP0",
+                                "ProPhoto RGB", "Rec.2100",    "CIE Lab", "CIE XYZ D65",
+                                "ACEScg-AP1",   "Rec.601",     "XYZ D50", "XYZ D65"};
   if (color_space < (sizeof names / sizeof names[0]))
     return names[color_space];
   return "Reserved";
