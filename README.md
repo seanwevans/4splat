@@ -158,3 +158,47 @@
  │▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
  ╰───────────────────────────────────────────────────────────────────────╯
 ```
+
+## Test Suite
+
+| Test | Description |
+| --- | --- |
+| `crc32_known_value` | Confirms the CRC32 implementation reproduces the standard checksum for the canonical "123456789" vector. |
+| `checksum_matches_footer` | Ensures a freshly built video records the same checksum in its footer as produced by the compute helper. |
+| `idxoffset_helpers_agree` | Checks that forward and reverse idxoffset helpers agree on the palette/index boundary. |
+| `validate_succeeds_for_valid_video` | Verifies that a well-formed sample video passes validation. |
+| `validate_fails_for_bad_checksum` | Expects validation to fail when the footer checksum is tampered with. |
+| `validate_fails_for_null_video` | Asserts validation rejects a null video pointer. |
+| `validate_fails_for_bad_magic` | Confirms validation catches an incorrect magic number. |
+| `validate_fails_for_bad_version` | Confirms validation rejects files with an unsupported version field. |
+| `validate_fails_for_zero_width` | Ensures validation fails if the header width is zero. |
+| `validate_fails_for_zero_height` | Ensures validation fails when the header height is zero. |
+| `validate_fails_for_zero_depth` | Ensures validation fails when the header depth is zero. |
+| `validate_fails_for_zero_frames` | Ensures validation fails when the header frame count is zero. |
+| `validate_fails_for_zero_palette_size` | Ensures validation fails when the palette size is zero. |
+| `validate_fails_for_bad_footer_marker` | Confirms validation detects an incorrect footer terminator. |
+| `validate_fails_for_big_endian_flag` | Verifies validation flags files marked as big-endian, which the codec does not support. |
+| `validate_fails_for_unsupported_precision` | Ensures validation rejects headers requesting unsupported float precision. |
+| `validate_detects_corrupted_index` | Confirms validation catches index data corruption without a matching checksum update. |
+| `write_and_read_round_trip` | Exercises writing a video to disk and reading it back to guarantee structural fidelity. |
+| `write_header_rejects_null_fp` | Checks that header writing fails when given a null file pointer. |
+| `write_header_rejects_null_header` | Verifies header writing refuses to operate on a null header. |
+| `read_header_rejects_null_fp` | Ensures header reading fails when the file pointer is null. |
+| `read_header_rejects_null_header` | Ensures header reading fails when the output header pointer is null. |
+| `write_palette_rejects_nulls` | Confirms palette writing validates its pointers and entry count. |
+| `read_palette_rejects_invalid_inputs` | Ensures palette reading rejects null pointers or zero-length requests. |
+| `read_palette_fails_on_short_file` | Verifies palette reading detects truncated palette data. |
+| `write_index_rejects_nulls` | Confirms index writing validates its pointers and entry count. |
+| `read_index_rejects_invalid_inputs` | Ensures index reading rejects null pointers or zero-length requests. |
+| `read_index_fails_on_short_file` | Verifies index reading detects truncated index data. |
+| `write_footer_rejects_nulls` | Confirms footer writing fails with null file or footer pointers. |
+| `read_footer_rejects_nulls` | Ensures footer reading fails when provided null inputs. |
+| `read_footer_fails_on_short_file` | Verifies footer reading detects truncated footer data. |
+| `write_video_rejects_nulls` | Confirms video writing validates both the file pointer and video structure. |
+| `read_video_rejects_nulls` | Ensures video reading refuses null file pointers or video outputs. |
+| `read_video_fails_on_truncated_index` | Verifies video reading catches truncated index sections and cleans up allocations. |
+| `read_video_fails_on_crc_mismatch` | Ensures video reading fails when the stored checksum does not match the payload. |
+| `read_video_rejects_big_endian_flag` | Confirms video reading rejects files flagged as big-endian. |
+| `read_video_fails_on_invalid_footer_marker` | Ensures video reading fails when the footer terminator is corrupted. |
+| `idxoffset_sanity_mismatch` | Checks the idxoffset sanity helpers catch mismatched offsets between header and footer. |
+| `header_defaults_to_float32_precision` | Verifies header construction defaults the precision flag to float32 when unspecified. |
