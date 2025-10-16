@@ -164,9 +164,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum {
-  SPLAT4D_STREAM_CHUNK_SIZE = 1 << 15
-};
+enum { SPLAT4D_STREAM_CHUNK_SIZE = 1 << 15 };
 
 typedef struct {
   float mu_x, sigma_x, mu_y, sigma_y, mu_z, sigma_z, mu_t, sigma_t, r, g, b, alpha;
@@ -235,8 +233,8 @@ static inline uint32_t crc32_final(crc32_t *c) { return ~c->v; }
 // streaming helpers //
 typedef bool (*Splat4DChunkFn)(const uint8_t *chunk, size_t n, void *ctx);
 
-static bool splat4d_stream_block(const uint8_t *data, size_t len, size_t chunk,
-                                 Splat4DChunkFn fn, void *ctx) {
+static bool splat4d_stream_block(const uint8_t *data, size_t len, size_t chunk, Splat4DChunkFn fn,
+                                 void *ctx) {
   if (!data || len == 0)
     return true;
 
@@ -253,21 +251,19 @@ static bool splat4d_stream_block(const uint8_t *data, size_t len, size_t chunk,
   return true;
 }
 
-static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk,
-                                         Splat4DChunkFn fn, void *ctx) {
+static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Splat4DChunkFn fn,
+                                         void *ctx) {
   if (!v || !fn)
     return false;
 
-  if (!splat4d_stream_block((const uint8_t *)&v->header, sizeof v->header, chunk, fn,
-                             ctx))
+  if (!splat4d_stream_block((const uint8_t *)&v->header, sizeof v->header, chunk, fn, ctx))
     return false;
 
   size_t palette_bytes = (size_t)v->header.pSize * sizeof(Splat4D);
   if (palette_bytes > 0) {
     if (!v->palette.palette)
       return false;
-    if (!splat4d_stream_block((const uint8_t *)v->palette.palette, palette_bytes, chunk,
-                              fn, ctx))
+    if (!splat4d_stream_block((const uint8_t *)v->palette.palette, palette_bytes, chunk, fn, ctx))
       return false;
   }
 
@@ -276,8 +272,7 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk,
   if (index_bytes > 0) {
     if (!v->index.index)
       return false;
-    if (!splat4d_stream_block((const uint8_t *)v->index.index, index_bytes, chunk, fn,
-                              ctx))
+    if (!splat4d_stream_block((const uint8_t *)v->index.index, index_bytes, chunk, fn, ctx))
       return false;
   }
 
