@@ -251,6 +251,36 @@ static bool splat4d_stream_block(const uint8_t *data, size_t len, size_t chunk, 
   return true;
 }
 
+static bool checked_mul_u64(uint64_t a, uint64_t b, uint64_t *out) {
+  if (!out)
+    return false;
+  if (b != 0 && a > UINT64_MAX / b)
+    return false;
+  *out = a * b;
+  return true;
+}
+
+bool header_total_indices_checked(const Splat4DHeader *h, uint64_t *total) {
+  if (!h || !total)
+    return false;
+
+  uint64_t dims[4] = {h->width, h->height, h->depth, h->frames};
+  uint64_t acc = 1;
+  for (size_t i = 0; i < 4; ++i) {
+    if (dims[i] == 0)
+      return false;
+    if (!checked_mul_u64(acc, dims[i], &acc))
+      return false;
+  }
+
+  *total = acc;
+  return true;
+}
+
+uint64_t header_total_indices(const Splat4DHeader *h) {
+  return (uint64_t)h->width * (uint64_t)h->height * (uint64_t)h->depth * (uint64_t)h->frames;
+}
+
 static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Splat4DChunkFn fn,
                                          void *ctx) {
   if (!v || !fn)
@@ -330,12 +360,14 @@ uint32_t compute_idxoffset_reverse(const Splat4DHeader *h) {
 }
 
 bool sanity_check_idxoffset_file(FILE *fp, const Splat4DHeader *h, const Splat4DFooter *f) {
+  (void)fp;
   uint64_t expect =
       (uint64_t)sizeof(Splat4DHeader) + (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
   return f->idxoffset == expect;
 }
 
 bool check_idxoffset_file(FILE *fp, const Splat4DHeader *h, const Splat4DFooter *f) {
+  (void)fp;
   uint64_t after_header =
       (uint64_t)sizeof(Splat4DHeader) + (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
   return after_header == (uint64_t)f->idxoffset;
@@ -386,6 +418,125 @@ Splat4DHeader create_splat4DHeader(uint32_t width, uint32_t height, uint32_t dep
                          .flags = flags};
 }
 
+static const char *precision_name(uint32_t precision) {
+  static const char *names[] = {"Float16", "Float32", "Float64", "Float128"};
+  if (precision < (sizeof names / sizeof names[0]))
+    return names[precision];
+  return "Reserved";
+}
+
+static const char *compression_name(uint32_t compression) {
+  static const char *names[] = {"None",    "Run Length Encoding",
+                                "DEFLATE", "RAR",
+                                "LZO",     "Zlib",
+                                "bzip2",   "LZMA",
+                                "ZPAQ",    "XZ",
+                                "LZ4",     "Snappy",
+                                "LZHAM",   "Brotli",
+                                "LZFSE",   "Zstd"};
+  if (compression < (sizeof names / sizeof names[0]))
+    return names[compression];
+  return "Reserved";
+}
+
+static const char *index_width_name(uint32_t width) {
+  static const char *names[] = {"1 byte", "2 bytes", "4 bytes", "8 bytes"};
+  if (width < (sizeof names / sizeof names[0]))
+    return names[width];
+  return "Reserved";
+}
+
+static const char *splat_shape_name(uint32_t shape) {
+  static const char *names[] = {"Isotropic (1σ)", "Axis-Aligned", "Full Covariance", "Reserved"};
+  if (shape < (sizeof names / sizeof names[0]))
+    return names[shape];
+  return "Reserved";
+}
+
+static const char *color_space_name(uint32_t color_space) {
+  static const char *names[] = {"sRGB",         "Linear sRGB", "OKLab",   "Display P3",
+                                "Rec.709",      "Rec.2020",    "DCI-P3",  "ACES-AP0",
+                                "ProPhoto RGB", "Rec.2100",    "CIE Lab", "CIE XYZ D65",
+                                "ACEScg-AP1",   "Rec.601",     "XYZ D50", "XYZ D65"};
+  if (color_space < (sizeof names / sizeof names[0]))
+    return names[color_space];
+  return "Reserved";
+}
+
+static const char *interpolation_name(uint32_t interpolation) {
+  static const char *names[] = {"None",
+                                "Nearest Neighbor",
+                                "Axis-Aligned",
+                                "Smooth",
+                                "Lanczos",
+                                "Gaussian",
+                                "Catmull-Rom",
+                                "NURBS",
+                                "Radial Basis Fn",
+                                "Optical Flow",
+                                "Neural",
+                                "Akima Splines",
+                                "Inverse Distance",
+                                "Fourier",
+                                "Moving Least Sq",
+                                "Cubic Hermite"};
+  if (interpolation < (sizeof names / sizeof names[0]))
+    return names[interpolation];
+  return "Reserved";
+}
+
+static void print_flag_line(FILE *out, const char *label, const char *value) {
+  if (!out || !label || !value)
+    return;
+
+  char buffer[128];
+  int written = snprintf(buffer, sizeof buffer, "  %-12s %s", label, value);
+  if (written < 0)
+    return;
+
+  size_t len = (size_t)written;
+  const size_t width = 27; // width of the content between the │ characters
+
+  fputs("│", out);
+  fputs(buffer, out);
+  if (len < width) {
+    for (size_t i = len; i < width; ++i)
+      fputc(' ', out);
+  }
+  fputs(" │\n", out);
+}
+
+void print_flags(uint32_t flags) {
+  const char *endian = (flags & 0x1u) ? "Big-Endian" : "Little-Endian";
+  const char *sorted = (flags & 0x2u) ? "Yes" : "No";
+  uint32_t precision_bits = (flags >> 2) & 0x3u;
+  uint32_t compression_bits = (flags >> 4) & 0xFu;
+  uint32_t index_width_bits = (flags >> 8) & 0x3u;
+  uint32_t splat_shape_bits = (flags >> 10) & 0x3u;
+  uint32_t color_space_bits = (flags >> 12) & 0xFu;
+  uint32_t interpolation_bits = (flags >> 16) & 0xFu;
+  uint32_t encryption_bits = (flags >> 20) & 0xFu;
+  uint32_t metadata_bits = (flags >> 24) & 0xFFu;
+
+  char buffer[32];
+
+  print_flag_line(stdout, "endian", endian);
+  print_flag_line(stdout, "sorted", sorted);
+
+  print_flag_line(stdout, "precision", precision_name(precision_bits));
+  print_flag_line(stdout, "compression", compression_name(compression_bits));
+  print_flag_line(stdout, "index width", index_width_name(index_width_bits));
+  print_flag_line(stdout, "splat shape", splat_shape_name(splat_shape_bits));
+  print_flag_line(stdout, "color space", color_space_name(color_space_bits));
+  print_flag_line(stdout, "interp", interpolation_name(interpolation_bits));
+
+  snprintf(buffer, sizeof buffer, "0x%X", encryption_bits);
+  print_flag_line(stdout, "encryption", buffer);
+
+  snprintf(buffer, sizeof buffer, "0x%02X", metadata_bits);
+  print_flag_line(stdout, "metadata", buffer);
+}
+
 void print_splat4DHeader(const Splat4DHeader *h) {
   printf("│  magic        0X%-10X │\n", h->magic);
   printf("│  version      %02d.%02d.%02d-%02d  │\n", h->version[0], h->version[1], h->version[2],
@@ -396,6 +547,7 @@ void print_splat4DHeader(const Splat4DHeader *h) {
   printf("│  frames       0X%-10X │\n", h->frames);
   printf("│  palette size 0X%-10X │\n", h->pSize);
   printf("│  flags        0X%-10X │\n", h->flags);
+  print_flags(h->flags);
   printf("│  idxs %-20" PRIu64 " │\n", header_total_indices(h));
   printf("│                            │\n");
 }
@@ -432,7 +584,11 @@ bool write_splat4DPalette(FILE *fp, const Splat4DPalette *p, uint32_t count) {
 bool read_splat4DPalette(FILE *fp, Splat4DPalette *p, uint32_t count) {
   if (!fp || !p || count == 0)
     return false;
-  p->palette = malloc(count * sizeof(Splat4D));
+  uint64_t bytes64 = 0;
+  if (!checked_mul_u64((uint64_t)count, (uint64_t)sizeof(Splat4D), &bytes64) || bytes64 > SIZE_MAX)
+    return false;
+  size_t bytes = (size_t)bytes64;
+  p->palette = malloc(bytes);
   if (!p->palette)
     return false;
   if (fread(p->palette, sizeof(Splat4D), count, fp) != count) {
@@ -469,10 +625,15 @@ bool write_splat4DIndex(FILE *fp, const Splat4DIndex *i, uint64_t total) {
 bool read_splat4DIndex(FILE *fp, Splat4DIndex *i, uint64_t total) {
   if (!fp || !i || total == 0)
     return false;
-  i->index = malloc(total * sizeof(uint64_t));
+  uint64_t bytes64 = 0;
+  if (!checked_mul_u64(total, (uint64_t)sizeof(uint64_t), &bytes64) || bytes64 > SIZE_MAX)
+    return false;
+  size_t bytes = (size_t)bytes64;
+  i->index = malloc(bytes);
   if (!i->index)
     return false;
-  if (fread(i->index, sizeof(uint64_t), total, fp) != total) {
+  size_t total_count = (size_t)total;
+  if (fread(i->index, sizeof(uint64_t), total_count, fp) != total_count) {
     free(i->index);
     i->index = NULL;
     return false;
@@ -558,12 +719,35 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   if (!read_splat4DHeader(fp, &v->header))
     return false;
 
+  if (v->header.pSize == 0) {
+    fprintf(stderr, "❌ Invalid palette size\n");
+    return false;
+  }
+
+  uint64_t palette_bytes = 0;
+  if (!checked_mul_u64((uint64_t)v->header.pSize, (uint64_t)sizeof(Splat4D), &palette_bytes) ||
+      palette_bytes > SIZE_MAX) {
+    fprintf(stderr, "❌ Invalid palette size\n");
+    return false;
+  }
+
+  uint64_t total = 0;
+  if (!header_total_indices_checked(&v->header, &total)) {
+    fprintf(stderr, "❌ Invalid index count\n");
+    return false;
+  }
+
+  uint64_t index_bytes = 0;
+  if (!checked_mul_u64(total, (uint64_t)sizeof(uint64_t), &index_bytes) || index_bytes > SIZE_MAX) {
+    fprintf(stderr, "❌ Invalid index count\n");
+    return false;
+  }
+
   // Read palette
   if (!read_splat4DPalette(fp, &v->palette, v->header.pSize))
     return false;
 
   // Read index
-  uint64_t total = header_total_indices(&v->header);
   if (!read_splat4DIndex(fp, &v->index, total)) {
     free(v->palette.palette);
     v->palette.palette = NULL;
