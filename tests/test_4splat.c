@@ -165,65 +165,71 @@ static bool test_validate_fails_for_bad_footer_marker(void) {
 }
 
 static bool test_validate_fails_for_big_endian_flag(void) {
-  static bool test_validate_detects_corrupted_index(void) {
-    Splat4D palette[2];
-    uint64_t indices[4];
-    make_palette(palette);
-    make_indices(indices);
-    Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
-    video.header.flags |= SPLAT_FLAG_ENDIAN_BIG;
-    video.footer.checksum = compute_video_checksum(&video);
-    return !validate_splat4DVideo(&video);
-  }
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+  video.header.flags |= SPLAT_FLAG_ENDIAN_BIG;
+  video.footer.checksum = compute_video_checksum(&video);
+  return !validate_splat4DVideo(&video);
+}
 
-  static bool test_validate_fails_for_unsupported_precision(void) {
-    Splat4D palette[2];
-    uint64_t indices[4];
-    make_palette(palette);
-    make_indices(indices);
-    Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
-    video.header.flags &= ~SPLAT_FLAG_PRECISION_MASK;
-    video.header.flags |= SPLAT_FLAG_PRECISION_FLOAT64;
-    video.footer.checksum = compute_video_checksum(&video);
-    return !validate_splat4DVideo(&video);
-  }
+static bool test_validate_detects_corrupted_index(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+  // Mutate index data without updating the footer checksum to simulate corruption.
+  video.index.index[0] ^= 1u;
+  return !validate_splat4DVideo(&video);
+}
 
-  static bool test_read_video_rejects_big_endian_flag(void) {
-    Splat4D palette_data[2];
-    uint64_t indices[4];
-    make_palette(palette_data);
-    make_indices(indices);
-    Splat4DVideo video = create_splat4DVideo(make_header(), palette_data, indices);
-    video.header.flags |= SPLAT_FLAG_ENDIAN_BIG;
+static bool test_validate_fails_for_unsupported_precision(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+  video.header.flags &= ~SPLAT_FLAG_PRECISION_MASK;
+  video.header.flags |= SPLAT_FLAG_PRECISION_FLOAT64;
+  video.footer.checksum = compute_video_checksum(&video);
+  return !validate_splat4DVideo(&video);
+}
 
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
+static bool test_read_video_rejects_big_endian_flag(void) {
+  Splat4D palette_data[2];
+  uint64_t indices[4];
+  make_palette(palette_data);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette_data, indices);
+  video.header.flags |= SPLAT_FLAG_ENDIAN_BIG;
+  video.footer.checksum = compute_video_checksum(&video);
 
-    if (!write_splat4DVideo(fp, &video)) {
-      fclose(fp);
-      return false;
-    }
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
 
-    rewind(fp);
-    Splat4DVideo loaded;
-    bool ok = !read_splat4DVideo(fp, &loaded);
+  if (!write_splat4DVideo(fp, &video)) {
     fclose(fp);
-    return ok;
+    return false;
   }
 
-  static bool test_header_defaults_to_float32_precision(void) {
-    Splat4DHeader header = create_splat4DHeader(/*width=*/2, /*height=*/2, /*depth=*/1,
-                                                /*frames=*/1, /*pSize=*/2, /*flags=*/0);
-    return (header.flags & SPLAT_FLAG_PRECISION_MASK) == SPLAT_FLAG_PRECISION_FLOAT32;
+  rewind(fp);
+  Splat4DVideo loaded;
+  bool ok = !read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  return ok;
+}
 
-    // Mutate index data without updating the footer checksum to simulate corruption.
-    video.index.index[0] ^= 1u;
+static bool test_header_defaults_to_float32_precision(void) {
+  Splat4DHeader header = create_splat4DHeader(/*width=*/2, /*height=*/2, /*depth=*/1,
+                                              /*frames=*/1, /*pSize=*/2, /*flags=*/0);
+  return (header.flags & SPLAT_FLAG_PRECISION_MASK) == SPLAT_FLAG_PRECISION_FLOAT32;
+}
 
-    return !validate_splat4DVideo(&video);
-  }
-
-  static bool test_write_and_read_round_trip(void) {
+static bool test_write_and_read_round_trip(void) {
     Splat4D palette[2];
     uint64_t indices[4];
     make_palette(palette);

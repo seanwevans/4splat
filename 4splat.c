@@ -535,7 +535,7 @@ typedef struct {
   uint8_t version[4];
   uint32_t width, height, depth, frames;
   uint32_t pSize;
-  Splat4DFlags flags;
+  uint32_t flags;
 } Splat4DHeader;
 
 typedef struct {
@@ -693,10 +693,6 @@ static bool splat4d_stream_file_consumer(const uint8_t *chunk, size_t n, void *c
   return true;
 }
 
-uint64_t header_total_indices(const Splat4DHeader *h) {
-  return (uint64_t)h->width * (uint64_t)h->height * (uint64_t)h->depth * (uint64_t)h->frames;
-}
-
 uint32_t compute_video_checksum(const Splat4DVideo *v) {
   if (!v)
     return 0;
@@ -807,7 +803,7 @@ static const char *index_width_name(uint32_t width) {
   return "Reserved";
 }
 
-static const char *splat_shape_name(uint32_t shape) {
+static const char *splat_shape_label(uint32_t shape) {
   static const char *names[] = {"Isotropic (1σ)", "Axis-Aligned", "Full Covariance", "Reserved"};
   if (shape < (sizeof names / sizeof names[0]))
     return names[shape];
@@ -887,7 +883,7 @@ void print_flags(uint32_t flags) {
   print_flag_line(stdout, "precision", precision_name(precision_bits));
   print_flag_line(stdout, "compression", compression_name(compression_bits));
   print_flag_line(stdout, "index width", index_width_name(index_width_bits));
-  print_flag_line(stdout, "splat shape", splat_shape_name(splat_shape_bits));
+  print_flag_line(stdout, "splat shape", splat_shape_label(splat_shape_bits));
   print_flag_line(stdout, "color space", color_space_name(color_space_bits));
   print_flag_line(stdout, "interp", interpolation_name(interpolation_bits));
 
@@ -907,21 +903,21 @@ void print_splat4DHeader(const Splat4DHeader *h) {
   printf("│  depth        0X%-10X │\n", h->depth);
   printf("│  frames       0X%-10X │\n", h->frames);
   printf("│  palette size 0X%-10X │\n", h->pSize);
-  printf("│  flags        0X%-10X │\n", h->flags.raw);
-  printf("│    endian     %-14s │\n", splat_endian_name((SplatEndian)h->flags.bits.endian));
-  printf("│    sort       %-14s │\n", splat_sort_order_name((SplatSortOrder)h->flags.bits.sorted));
-  printf("│    precision  %-14s │\n",
-         splat_precision_name((SplatPrecision)h->flags.bits.precision));
-  printf("│    compress   %-14s │\n",
-         splat_compression_name((SplatCompression)h->flags.bits.compression));
-  printf("│    index      %-14s │\n",
-         splat_index_width_name((SplatIndexWidth)h->flags.bits.index_width));
-  printf("│    shape      %-14s │\n", splat_shape_name((SplatShape)h->flags.bits.splat_shape));
-  printf("│    color      %-14s │\n",
-         splat_color_space_name((SplatColorSpace)h->flags.bits.color_space));
-  printf("│    interp     %-14s │\n",
-         splat_interpolation_name((SplatInterpolation)h->flags.bits.interpolation));
   printf("│  flags        0X%-10X │\n", h->flags);
+  Splat4DFlags decoded = splat4d_flags_from_raw(h->flags);
+  printf("│    endian     %-14s │\n", splat_endian_name((SplatEndian)decoded.bits.endian));
+  printf("│    sort       %-14s │\n", splat_sort_order_name((SplatSortOrder)decoded.bits.sorted));
+  printf("│    precision  %-14s │\n",
+         splat_precision_name((SplatPrecision)decoded.bits.precision));
+  printf("│    compress   %-14s │\n",
+         splat_compression_name((SplatCompression)decoded.bits.compression));
+  printf("│    index      %-14s │\n",
+         splat_index_width_name((SplatIndexWidth)decoded.bits.index_width));
+  printf("│    shape      %-14s │\n", splat_shape_name((SplatShape)decoded.bits.splat_shape));
+  printf("│    color      %-14s │\n",
+         splat_color_space_name((SplatColorSpace)decoded.bits.color_space));
+  printf("│    interp     %-14s │\n",
+         splat_interpolation_name((SplatInterpolation)decoded.bits.interpolation));
   print_flags(h->flags);
   printf("│  idxs %-20" PRIu64 " │\n", header_total_indices(h));
   printf("│                            │\n");
