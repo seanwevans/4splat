@@ -165,370 +165,376 @@ static bool test_validate_fails_for_bad_footer_marker(void) {
 }
 
 static bool test_validate_fails_for_big_endian_flag(void) {
-  static bool test_validate_detects_corrupted_index(void) {
-    Splat4D palette[2];
-    uint64_t indices[4];
-    make_palette(palette);
-    make_indices(indices);
-    Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
-    video.header.flags |= SPLAT_FLAG_ENDIAN_BIG;
-    video.footer.checksum = compute_video_checksum(&video);
-    return !validate_splat4DVideo(&video);
-  }
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+  video.header.flags |= SPLAT_FLAG_ENDIAN_BIG;
+  video.footer.checksum = compute_video_checksum(&video);
+  return !validate_splat4DVideo(&video);
+}
 
-  static bool test_validate_fails_for_unsupported_precision(void) {
-    Splat4D palette[2];
-    uint64_t indices[4];
-    make_palette(palette);
-    make_indices(indices);
-    Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
-    video.header.flags &= ~SPLAT_FLAG_PRECISION_MASK;
-    video.header.flags |= SPLAT_FLAG_PRECISION_FLOAT64;
-    video.footer.checksum = compute_video_checksum(&video);
-    return !validate_splat4DVideo(&video);
-  }
+static bool test_validate_fails_for_unsupported_precision(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+  video.header.flags &= ~SPLAT_FLAG_PRECISION_MASK;
+  video.header.flags |= SPLAT_FLAG_PRECISION_FLOAT64;
+  video.footer.checksum = compute_video_checksum(&video);
+  return !validate_splat4DVideo(&video);
+}
 
-  static bool test_read_video_rejects_big_endian_flag(void) {
-    Splat4D palette_data[2];
-    uint64_t indices[4];
-    make_palette(palette_data);
-    make_indices(indices);
-    Splat4DVideo video = create_splat4DVideo(make_header(), palette_data, indices);
-    video.header.flags |= SPLAT_FLAG_ENDIAN_BIG;
+static bool test_validate_detects_corrupted_index(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
 
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
+  // Mutate index data without updating the footer checksum to simulate corruption.
+  video.index.index[0] ^= 1u;
+  return !validate_splat4DVideo(&video);
+}
 
-    if (!write_splat4DVideo(fp, &video)) {
-      fclose(fp);
-      return false;
-    }
+static bool test_write_and_read_round_trip(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo original = create_splat4DVideo(make_header(), palette, indices);
 
-    rewind(fp);
-    Splat4DVideo loaded;
-    bool ok = !read_splat4DVideo(fp, &loaded);
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+
+  bool wrote = write_splat4DVideo(fp, &original);
+  if (!wrote) {
     fclose(fp);
-    return ok;
+    return false;
   }
 
-  static bool test_header_defaults_to_float32_precision(void) {
-    Splat4DHeader header = create_splat4DHeader(/*width=*/2, /*height=*/2, /*depth=*/1,
-                                                /*frames=*/1, /*pSize=*/2, /*flags=*/0);
-    return (header.flags & SPLAT_FLAG_PRECISION_MASK) == SPLAT_FLAG_PRECISION_FLOAT32;
+  rewind(fp);
+  Splat4DVideo loaded;
+  bool read = read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  if (!read)
+    return false;
 
-    // Mutate index data without updating the footer checksum to simulate corruption.
-    video.index.index[0] ^= 1u;
+  bool headers_match = memcmp(&original.header, &loaded.header, sizeof(Splat4DHeader)) == 0;
+  bool palette_match = memcmp(original.palette.palette, loaded.palette.palette,
+                              original.header.pSize * sizeof(Splat4D)) == 0;
+  bool index_match = memcmp(original.index.index, loaded.index.index,
+                            header_total_indices(&original.header) * sizeof(uint64_t)) == 0;
+  bool footer_match = memcmp(&original.footer, &loaded.footer, sizeof(Splat4DFooter)) == 0;
 
-    return !validate_splat4DVideo(&video);
-  }
+  free_splat4DVideo(&loaded);
 
-  static bool test_write_and_read_round_trip(void) {
-    Splat4D palette[2];
-    uint64_t indices[4];
-    make_palette(palette);
-    make_indices(indices);
-    Splat4DVideo original = create_splat4DVideo(make_header(), palette, indices);
+  return headers_match && palette_match && index_match && footer_match;
+}
 
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
+static bool test_write_header_rejects_null_fp(void) {
+  Splat4DHeader header = make_header();
+  return !write_splat4DHeader(NULL, &header);
+}
 
-    bool wrote = write_splat4DVideo(fp, &original);
-    if (!wrote) {
-      fclose(fp);
-      return false;
-    }
+static bool test_write_header_rejects_null_header(void) {
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  bool ok = !write_splat4DHeader(fp, NULL);
+  fclose(fp);
+  return ok;
+}
 
-    rewind(fp);
-    Splat4DVideo loaded;
-    bool read = read_splat4DVideo(fp, &loaded);
-    fclose(fp);
-    if (!read)
-      return false;
+static bool test_read_header_rejects_null_fp(void) {
+  Splat4DHeader header;
+  return !read_splat4DHeader(NULL, &header);
+}
 
-    bool headers_match = memcmp(&original.header, &loaded.header, sizeof(Splat4DHeader)) == 0;
-    bool palette_match = memcmp(original.palette.palette, loaded.palette.palette,
-                                original.header.pSize * sizeof(Splat4D)) == 0;
-    bool index_match = memcmp(original.index.index, loaded.index.index,
-                              header_total_indices(&original.header) * sizeof(uint64_t)) == 0;
-    bool footer_match = memcmp(&original.footer, &loaded.footer, sizeof(Splat4DFooter)) == 0;
+static bool test_read_header_rejects_null_header(void) {
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  Splat4DHeader header = make_header();
+  fwrite(&header, sizeof(Splat4DHeader), 1, fp);
+  rewind(fp);
+  bool ok = !read_splat4DHeader(fp, NULL);
+  fclose(fp);
+  return ok;
+}
 
+static bool test_write_palette_rejects_nulls(void) {
+  Splat4D palette_data[2];
+  make_palette(palette_data);
+  Splat4DPalette palette = create_splat4DPalette(palette_data);
+  bool all_failed = true;
+  all_failed &= !write_splat4DPalette(NULL, &palette, 2);
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  all_failed &= !write_splat4DPalette(fp, NULL, 2);
+  Splat4DPalette empty = create_splat4DPalette(NULL);
+  all_failed &= !write_splat4DPalette(fp, &empty, 2);
+  all_failed &= !write_splat4DPalette(fp, &palette, 0);
+  fclose(fp);
+  return all_failed;
+}
+
+static bool test_read_palette_rejects_invalid_inputs(void) {
+  Splat4DPalette palette;
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  bool fail_fp = !read_splat4DPalette(NULL, &palette, 2);
+  bool fail_palette = !read_splat4DPalette(fp, NULL, 2);
+  bool fail_count = !read_splat4DPalette(fp, &palette, 0);
+  fclose(fp);
+  return fail_fp && fail_palette && fail_count;
+}
+
+static bool test_read_palette_fails_on_short_file(void) {
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  // Write less data than required for two splats.
+  Splat4D one = create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  fwrite(&one, sizeof(Splat4D), 1, fp);
+  rewind(fp);
+  Splat4DPalette palette = {.palette = NULL};
+  bool ok = !read_splat4DPalette(fp, &palette, 2) && palette.palette == NULL;
+  fclose(fp);
+  return ok;
+}
+
+static bool test_write_index_rejects_nulls(void) {
+  uint64_t indices[4];
+  make_indices(indices);
+  Splat4DIndex index = create_splat4DIndex(indices);
+  bool all_failed = true;
+  all_failed &= !write_splat4DIndex(NULL, &index, 4);
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  all_failed &= !write_splat4DIndex(fp, NULL, 4);
+  Splat4DIndex empty = create_splat4DIndex(NULL);
+  all_failed &= !write_splat4DIndex(fp, &empty, 4);
+  all_failed &= !write_splat4DIndex(fp, &index, 0);
+  fclose(fp);
+  return all_failed;
+}
+
+static bool test_read_index_rejects_invalid_inputs(void) {
+  Splat4DIndex index;
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  bool fail_fp = !read_splat4DIndex(NULL, &index, 4);
+  bool fail_index = !read_splat4DIndex(fp, NULL, 4);
+  bool fail_count = !read_splat4DIndex(fp, &index, 0);
+  fclose(fp);
+  return fail_fp && fail_index && fail_count;
+}
+
+static bool test_read_index_fails_on_short_file(void) {
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  uint64_t value = 42;
+  fwrite(&value, sizeof(uint64_t), 1, fp);
+  rewind(fp);
+  Splat4DIndex index = {.index = NULL};
+  bool ok = !read_splat4DIndex(fp, &index, 4) && index.index == NULL;
+  fclose(fp);
+  return ok;
+}
+
+static bool test_write_footer_rejects_nulls(void) {
+  Splat4DHeader header = make_header();
+  Splat4DFooter footer = create_splat4DFooter(&header);
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  bool ok = !write_splat4DFooter(NULL, &footer) && !write_splat4DFooter(fp, NULL);
+  fclose(fp);
+  return ok;
+}
+
+static bool test_read_footer_rejects_nulls(void) {
+  Splat4DFooter footer;
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  bool ok = !read_splat4DFooter(NULL, &footer) && !read_splat4DFooter(fp, NULL);
+  fclose(fp);
+  return ok;
+}
+
+static bool test_read_footer_fails_on_short_file(void) {
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+
+  Splat4DFooter footer = create_splat4DFooter(&(Splat4DHeader){0});
+  fwrite(&footer, sizeof(uint8_t), sizeof(Splat4DFooter) - 1, fp);
+  rewind(fp);
+
+  Splat4DFooter out = {0};
+  bool failed = !read_splat4DFooter(fp, &out);
+  fclose(fp);
+  return failed;
+}
+
+static bool test_write_video_rejects_nulls(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  bool ok = !write_splat4DVideo(NULL, &video) && !write_splat4DVideo(fp, NULL);
+  fclose(fp);
+  return ok;
+}
+
+static bool test_read_video_rejects_nulls(void) {
+  Splat4DVideo video;
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  bool ok = !read_splat4DVideo(NULL, &video) && !read_splat4DVideo(fp, NULL);
+  fclose(fp);
+  return ok;
+}
+
+static bool test_read_video_fails_on_truncated_index(void) {
+  Splat4D palette_data[2];
+  uint64_t indices[4];
+  make_palette(palette_data);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette_data, indices);
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+
+  fwrite(&video.header, sizeof(Splat4DHeader), 1, fp);
+  fwrite(video.palette.palette, sizeof(Splat4D), video.header.pSize, fp);
+  // Intentionally omit index/footers.
+  rewind(fp);
+
+  Splat4DVideo loaded;
+  loaded.palette.palette = (Splat4D *)0x1;
+  loaded.index.index = (uint64_t *)0x1;
+  bool ok = !read_splat4DVideo(fp, &loaded) && loaded.palette.palette == NULL &&
+            loaded.index.index == NULL;
+  fclose(fp);
+  return ok;
+}
+
+static bool test_read_video_fails_on_crc_mismatch(void) {
+  Splat4D palette_data[2];
+  uint64_t indices[4];
+  make_palette(palette_data);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette_data, indices);
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+
+  write_splat4DVideo(fp, &video);
+
+  // Corrupt checksum at end of file.
+  fseek(fp, -(long)sizeof(Splat4DFooter), SEEK_END);
+  uint32_t bad = video.footer.checksum ^ 0xFFFFFFFFu;
+  fwrite(&bad, sizeof(uint32_t), 1, fp);
+  fflush(fp);
+  rewind(fp);
+
+  Splat4DVideo loaded;
+  bool ok = !read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  if (ok)
     free_splat4DVideo(&loaded);
+  return ok;
+}
 
-    return headers_match && palette_match && index_match && footer_match;
-  }
+static bool test_read_video_rejects_big_endian_flag(void) {
+  Splat4D palette_data[2];
+  uint64_t indices[4];
+  make_palette(palette_data);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette_data, indices);
+  video.header.flags |= SPLAT_FLAG_ENDIAN_BIG;
 
-  static bool test_write_header_rejects_null_fp(void) {
-    Splat4DHeader header = make_header();
-    return !write_splat4DHeader(NULL, &header);
-  }
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
 
-  static bool test_write_header_rejects_null_header(void) {
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    bool ok = !write_splat4DHeader(fp, NULL);
+  if (!write_splat4DVideo(fp, &video)) {
     fclose(fp);
-    return ok;
+    return false;
   }
 
-  static bool test_read_header_rejects_null_fp(void) {
-    Splat4DHeader header;
-    return !read_splat4DHeader(NULL, &header);
-  }
+  rewind(fp);
+  Splat4DVideo loaded;
+  bool ok = !read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  return ok;
+}
 
-  static bool test_read_header_rejects_null_header(void) {
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    Splat4DHeader header = make_header();
-    fwrite(&header, sizeof(Splat4DHeader), 1, fp);
-    rewind(fp);
-    bool ok = !read_splat4DHeader(fp, NULL);
+static bool test_read_video_fails_on_invalid_footer_marker(void) {
+  Splat4D palette_data[2];
+  uint64_t indices[4];
+  make_palette(palette_data);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette_data, indices);
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+
+  if (!write_splat4DVideo(fp, &video)) {
     fclose(fp);
-    return ok;
+    return false;
   }
 
-  static bool test_write_palette_rejects_nulls(void) {
-    Splat4D palette_data[2];
-    make_palette(palette_data);
-    Splat4DPalette palette = create_splat4DPalette(palette_data);
-    bool all_failed = true;
-    all_failed &= !write_splat4DPalette(NULL, &palette, 2);
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    all_failed &= !write_splat4DPalette(fp, NULL, 2);
-    Splat4DPalette empty = create_splat4DPalette(NULL);
-    all_failed &= !write_splat4DPalette(fp, &empty, 2);
-    all_failed &= !write_splat4DPalette(fp, &palette, 0);
-    fclose(fp);
-    return all_failed;
-  }
+  // Corrupt the footer terminator.
+  fseek(fp, -(long)sizeof(Splat4DFooter), SEEK_END);
+  fseek(fp, (long)offsetof(Splat4DFooter, end), SEEK_CUR);
+  uint32_t invalid_end = 0;
+  fwrite(&invalid_end, sizeof(uint32_t), 1, fp);
+  fflush(fp);
+  rewind(fp);
 
-  static bool test_read_palette_rejects_invalid_inputs(void) {
-    Splat4DPalette palette;
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    bool fail_fp = !read_splat4DPalette(NULL, &palette, 2);
-    bool fail_palette = !read_splat4DPalette(fp, NULL, 2);
-    bool fail_count = !read_splat4DPalette(fp, &palette, 0);
-    fclose(fp);
-    return fail_fp && fail_palette && fail_count;
-  }
+  Splat4DVideo loaded;
+  memset(&loaded, 0, sizeof loaded);
+  bool failed = !read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  free_splat4DVideo(&loaded);
+  return failed;
+}
 
-  static bool test_read_palette_fails_on_short_file(void) {
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    // Write less data than required for two splats.
-    Splat4D one = create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-    fwrite(&one, sizeof(Splat4D), 1, fp);
-    rewind(fp);
-    Splat4DPalette palette = {.palette = NULL};
-    bool ok = !read_splat4DPalette(fp, &palette, 2) && palette.palette == NULL;
-    fclose(fp);
-    return ok;
-  }
+static bool test_idxoffset_sanity_mismatch(void) {
+  Splat4DHeader header = make_header();
+  Splat4DFooter footer = create_splat4DFooter(&header);
+  footer.idxoffset += sizeof(Splat4D);
+  return !sanity_check_idxoffset_file(NULL, &header, &footer) &&
+         !check_idxoffset_file(NULL, &header, &footer);
+}
 
-  static bool test_write_index_rejects_nulls(void) {
-    uint64_t indices[4];
-    make_indices(indices);
-    Splat4DIndex index = create_splat4DIndex(indices);
-    bool all_failed = true;
-    all_failed &= !write_splat4DIndex(NULL, &index, 4);
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    all_failed &= !write_splat4DIndex(fp, NULL, 4);
-    Splat4DIndex empty = create_splat4DIndex(NULL);
-    all_failed &= !write_splat4DIndex(fp, &empty, 4);
-    all_failed &= !write_splat4DIndex(fp, &index, 0);
-    fclose(fp);
-    return all_failed;
-  }
+static bool test_header_defaults_to_float32_precision(void) {
+  Splat4DHeader header = create_splat4DHeader(/*width=*/2, /*height=*/2, /*depth=*/1,
+                                              /*frames=*/1, /*pSize=*/2, /*flags=*/0);
+  return (header.flags & SPLAT_FLAG_PRECISION_MASK) == SPLAT_FLAG_PRECISION_FLOAT32;
+}
 
-  static bool test_read_index_rejects_invalid_inputs(void) {
-    Splat4DIndex index;
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    bool fail_fp = !read_splat4DIndex(NULL, &index, 4);
-    bool fail_index = !read_splat4DIndex(fp, NULL, 4);
-    bool fail_count = !read_splat4DIndex(fp, &index, 0);
-    fclose(fp);
-    return fail_fp && fail_index && fail_count;
-  }
-
-  static bool test_read_index_fails_on_short_file(void) {
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    uint64_t value = 42;
-    fwrite(&value, sizeof(uint64_t), 1, fp);
-    rewind(fp);
-    Splat4DIndex index = {.index = NULL};
-    bool ok = !read_splat4DIndex(fp, &index, 4) && index.index == NULL;
-    fclose(fp);
-    return ok;
-  }
-
-  static bool test_write_footer_rejects_nulls(void) {
-    Splat4DHeader header = make_header();
-    Splat4DFooter footer = create_splat4DFooter(&header);
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    bool ok = !write_splat4DFooter(NULL, &footer) && !write_splat4DFooter(fp, NULL);
-    fclose(fp);
-    return ok;
-  }
-
-  static bool test_read_footer_rejects_nulls(void) {
-    Splat4DFooter footer;
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    bool ok = !read_splat4DFooter(NULL, &footer) && !read_splat4DFooter(fp, NULL);
-    fclose(fp);
-    return ok;
-  }
-
-  static bool test_read_footer_fails_on_short_file(void) {
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-
-    Splat4DFooter footer = create_splat4DFooter(&(Splat4DHeader){0});
-    fwrite(&footer, sizeof(uint8_t), sizeof(Splat4DFooter) - 1, fp);
-    rewind(fp);
-
-    Splat4DFooter out = {0};
-    bool failed = !read_splat4DFooter(fp, &out);
-    fclose(fp);
-    return failed;
-  }
-
-  static bool test_write_video_rejects_nulls(void) {
-    Splat4D palette[2];
-    uint64_t indices[4];
-    make_palette(palette);
-    make_indices(indices);
-    Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    bool ok = !write_splat4DVideo(NULL, &video) && !write_splat4DVideo(fp, NULL);
-    fclose(fp);
-    return ok;
-  }
-
-  static bool test_read_video_rejects_nulls(void) {
-    Splat4DVideo video;
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-    bool ok = !read_splat4DVideo(NULL, &video) && !read_splat4DVideo(fp, NULL);
-    fclose(fp);
-    return ok;
-  }
-
-  static bool test_read_video_fails_on_truncated_index(void) {
-    Splat4D palette_data[2];
-    uint64_t indices[4];
-    make_palette(palette_data);
-    make_indices(indices);
-    Splat4DVideo video = create_splat4DVideo(make_header(), palette_data, indices);
-
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-
-    fwrite(&video.header, sizeof(Splat4DHeader), 1, fp);
-    fwrite(video.palette.palette, sizeof(Splat4D), video.header.pSize, fp);
-    // Intentionally omit index/footers.
-    rewind(fp);
-
-    Splat4DVideo loaded;
-    loaded.palette.palette = (Splat4D *)0x1;
-    loaded.index.index = (uint64_t *)0x1;
-    bool ok = !read_splat4DVideo(fp, &loaded) && loaded.palette.palette == NULL &&
-              loaded.index.index == NULL;
-    fclose(fp);
-    return ok;
-  }
-
-  static bool test_read_video_fails_on_crc_mismatch(void) {
-    Splat4D palette_data[2];
-    uint64_t indices[4];
-    make_palette(palette_data);
-    make_indices(indices);
-    Splat4DVideo video = create_splat4DVideo(make_header(), palette_data, indices);
-
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-
-    write_splat4DVideo(fp, &video);
-
-    // Corrupt checksum at end of file.
-    fseek(fp, -(long)sizeof(Splat4DFooter), SEEK_END);
-    uint32_t bad = video.footer.checksum ^ 0xFFFFFFFFu;
-    fwrite(&bad, sizeof(uint32_t), 1, fp);
-    fflush(fp);
-    rewind(fp);
-
-    Splat4DVideo loaded;
-    bool ok = !read_splat4DVideo(fp, &loaded);
-    fclose(fp);
-    if (ok)
-      free_splat4DVideo(&loaded);
-    return ok;
-  }
-
-  static bool test_read_video_fails_on_invalid_footer_marker(void) {
-    Splat4D palette_data[2];
-    uint64_t indices[4];
-    make_palette(palette_data);
-    make_indices(indices);
-    Splat4DVideo video = create_splat4DVideo(make_header(), palette_data, indices);
-
-    FILE *fp = tmpfile();
-    if (!fp)
-      return false;
-
-    if (!write_splat4DVideo(fp, &video)) {
-      fclose(fp);
-      return false;
-    }
-
-    // Corrupt the footer terminator.
-    fseek(fp, -(long)sizeof(Splat4DFooter), SEEK_END);
-    fseek(fp, (long)offsetof(Splat4DFooter, end), SEEK_CUR);
-    uint32_t invalid_end = 0;
-    fwrite(&invalid_end, sizeof(uint32_t), 1, fp);
-    fflush(fp);
-    rewind(fp);
-
-    Splat4DVideo loaded;
-    memset(&loaded, 0, sizeof loaded);
-    bool failed = !read_splat4DVideo(fp, &loaded);
-    fclose(fp);
-    free_splat4DVideo(&loaded);
-    return failed;
-  }
-
-  static bool test_idxoffset_sanity_mismatch(void) {
-    Splat4DHeader header = make_header();
-    Splat4DFooter footer = create_splat4DFooter(&header);
-    footer.idxoffset += sizeof(Splat4D);
-    return !sanity_check_idxoffset_file(NULL, &header, &footer) &&
-           !check_idxoffset_file(NULL, &header, &footer);
-  }
-
-  static test_case TESTS[] = {
+static test_case TESTS[] = {
       {"crc32_known_value", test_crc32_known_value},
       {"checksum_matches_footer", test_compute_video_checksum_matches_footer},
       {"idxoffset_helpers_agree", test_idxoffset_helpers_agree},
