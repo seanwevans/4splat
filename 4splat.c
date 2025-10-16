@@ -164,6 +164,49 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+  SPLAT_FLAG_ENDIAN_BIG = 1u << 0,
+
+  SPLAT_FLAG_PRECISION_SHIFT = 2,
+  SPLAT_FLAG_PRECISION_MASK = 0x3u << SPLAT_FLAG_PRECISION_SHIFT,
+  SPLAT_FLAG_PRECISION_FLOAT16 = 0x0u << SPLAT_FLAG_PRECISION_SHIFT,
+  SPLAT_FLAG_PRECISION_FLOAT32 = 0x1u << SPLAT_FLAG_PRECISION_SHIFT,
+  SPLAT_FLAG_PRECISION_FLOAT64 = 0x2u << SPLAT_FLAG_PRECISION_SHIFT,
+  SPLAT_FLAG_PRECISION_FLOAT128 = 0x3u << SPLAT_FLAG_PRECISION_SHIFT,
+
+  SPLAT_FLAG_SUPPORTED_MASK = SPLAT_FLAG_ENDIAN_BIG | SPLAT_FLAG_PRECISION_MASK,
+};
+
+static uint32_t sanitize_flags(uint32_t flags) {
+  // 4Splat files are always little-endian.
+  flags &= ~SPLAT_FLAG_ENDIAN_BIG;
+
+  if ((flags & SPLAT_FLAG_PRECISION_MASK) == SPLAT_FLAG_PRECISION_FLOAT16)
+    flags = (flags & ~SPLAT_FLAG_PRECISION_MASK) | SPLAT_FLAG_PRECISION_FLOAT32;
+
+  return flags;
+}
+
+static bool flags_supported(uint32_t flags) {
+  if (flags & ~SPLAT_FLAG_SUPPORTED_MASK) {
+    fprintf(stderr, "❌ Unsupported flag combination (0x%08X)\n", flags);
+    return false;
+  }
+
+  if (flags & SPLAT_FLAG_ENDIAN_BIG) {
+    fprintf(stderr, "❌ Big-endian 4Splat files are unsupported\n");
+    return false;
+  }
+
+  uint32_t precision = flags & SPLAT_FLAG_PRECISION_MASK;
+  if (precision != SPLAT_FLAG_PRECISION_FLOAT32) {
+    fprintf(stderr, "❌ Unsupported precision flag (0x%08X)\n", precision);
+    return false;
+  }
+
+  return true;
+}
+
 typedef struct {
   float mu_x, sigma_x, mu_y, sigma_y, mu_z, sigma_z, mu_t, sigma_t, r, g, b, alpha;
 } Splat4D;
@@ -313,6 +356,7 @@ void print_splat4D(const Splat4D *s, const uint32_t count) {
 // header
 Splat4DHeader create_splat4DHeader(uint32_t width, uint32_t height, uint32_t depth, uint32_t frames,
                                    uint32_t pSize, uint32_t flags) {
+  uint32_t sanitized = sanitize_flags(flags);
   return (Splat4DHeader){.magic = 0x3453504C,
                          .version = {1, 0, 0, 0},
                          .width = width,
@@ -320,7 +364,7 @@ Splat4DHeader create_splat4DHeader(uint32_t width, uint32_t height, uint32_t dep
                          .depth = depth,
                          .frames = frames,
                          .pSize = pSize,
-                         .flags = flags};
+                         .flags = sanitized};
 }
 
 void print_splat4DHeader(const Splat4DHeader *h) {
@@ -507,6 +551,9 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   if (!read_splat4DHeader(fp, &v->header))
     return false;
 
+  if (!flags_supported(v->header.flags))
+    return false;
+
   // Read palette
   if (!read_splat4DPalette(fp, &v->palette, v->header.pSize))
     return false;
@@ -609,6 +656,9 @@ bool validate_splat4DVideo(const Splat4DVideo *v) {
     fprintf(stderr, "❌ Positive palette size required\n");
     return false;
   }
+
+  if (!flags_supported(v->header.flags))
+    return false;
 
   if (v->footer.end != 0x4C505334) {
     fprintf(stderr, "❌ Invalid end-of-file marker\n");
