@@ -323,6 +323,145 @@ Splat4DHeader create_splat4DHeader(uint32_t width, uint32_t height, uint32_t dep
                          .flags = flags};
 }
 
+static const char *precision_name(uint32_t precision) {
+  static const char *names[] = {"Float16", "Float32", "Float64", "Float128"};
+  if (precision < (sizeof names / sizeof names[0]))
+    return names[precision];
+  return "Reserved";
+}
+
+static const char *compression_name(uint32_t compression) {
+  static const char *names[] = {"None",
+                                "Run Length Encoding",
+                                "DEFLATE",
+                                "RAR",
+                                "LZO",
+                                "Zlib",
+                                "bzip2",
+                                "LZMA",
+                                "ZPAQ",
+                                "XZ",
+                                "LZ4",
+                                "Snappy",
+                                "LZHAM",
+                                "Brotli",
+                                "LZFSE",
+                                "Zstd"};
+  if (compression < (sizeof names / sizeof names[0]))
+    return names[compression];
+  return "Reserved";
+}
+
+static const char *index_width_name(uint32_t width) {
+  static const char *names[] = {"1 byte", "2 bytes", "4 bytes", "8 bytes"};
+  if (width < (sizeof names / sizeof names[0]))
+    return names[width];
+  return "Reserved";
+}
+
+static const char *splat_shape_name(uint32_t shape) {
+  static const char *names[] = {"Isotropic (1σ)", "Axis-Aligned", "Full Covariance", "Reserved"};
+  if (shape < (sizeof names / sizeof names[0]))
+    return names[shape];
+  return "Reserved";
+}
+
+static const char *color_space_name(uint32_t color_space) {
+  static const char *names[] = {"sRGB",
+                                "Linear sRGB",
+                                "OKLab",
+                                "Display P3",
+                                "Rec.709",
+                                "Rec.2020",
+                                "DCI-P3",
+                                "ACES-AP0",
+                                "ProPhoto RGB",
+                                "Rec.2100",
+                                "CIE Lab",
+                                "CIE XYZ D65",
+                                "ACEScg-AP1",
+                                "Rec.601",
+                                "XYZ D50",
+                                "XYZ D65"};
+  if (color_space < (sizeof names / sizeof names[0]))
+    return names[color_space];
+  return "Reserved";
+}
+
+static const char *interpolation_name(uint32_t interpolation) {
+  static const char *names[] = {"None",
+                                "Nearest Neighbor",
+                                "Axis-Aligned",
+                                "Smooth",
+                                "Lanczos",
+                                "Gaussian",
+                                "Catmull-Rom",
+                                "NURBS",
+                                "Radial Basis Fn",
+                                "Optical Flow",
+                                "Neural",
+                                "Akima Splines",
+                                "Inverse Distance",
+                                "Fourier",
+                                "Moving Least Sq",
+                                "Cubic Hermite"};
+  if (interpolation < (sizeof names / sizeof names[0]))
+    return names[interpolation];
+  return "Reserved";
+}
+
+static void print_flag_line(FILE *out, const char *label, const char *value) {
+  if (!out || !label || !value)
+    return;
+
+  char buffer[128];
+  int written = snprintf(buffer, sizeof buffer, "  %-12s %s", label, value);
+  if (written < 0)
+    return;
+
+  size_t len = (size_t)written;
+  const size_t width = 27; // width of the content between the │ characters
+
+  fputs("│", out);
+  fputs(buffer, out);
+  if (len < width) {
+    for (size_t i = len; i < width; ++i)
+      fputc(' ', out);
+  }
+  fputs(" │\n", out);
+}
+
+void print_flags(uint32_t flags) {
+  const char *endian = (flags & 0x1u) ? "Big-Endian" : "Little-Endian";
+  const char *sorted = (flags & 0x2u) ? "Yes" : "No";
+  uint32_t precision_bits = (flags >> 2) & 0x3u;
+  uint32_t compression_bits = (flags >> 4) & 0xFu;
+  uint32_t index_width_bits = (flags >> 8) & 0x3u;
+  uint32_t splat_shape_bits = (flags >> 10) & 0x3u;
+  uint32_t color_space_bits = (flags >> 12) & 0xFu;
+  uint32_t interpolation_bits = (flags >> 16) & 0xFu;
+  uint32_t encryption_bits = (flags >> 20) & 0xFu;
+  uint32_t metadata_bits = (flags >> 24) & 0xFFu;
+
+  char buffer[32];
+
+  print_flag_line(stdout, "endian", endian);
+  print_flag_line(stdout, "sorted", sorted);
+
+  print_flag_line(stdout, "precision", precision_name(precision_bits));
+  print_flag_line(stdout, "compression", compression_name(compression_bits));
+  print_flag_line(stdout, "index width", index_width_name(index_width_bits));
+  print_flag_line(stdout, "splat shape", splat_shape_name(splat_shape_bits));
+  print_flag_line(stdout, "color space", color_space_name(color_space_bits));
+  print_flag_line(stdout, "interp", interpolation_name(interpolation_bits));
+
+  snprintf(buffer, sizeof buffer, "0x%X", encryption_bits);
+  print_flag_line(stdout, "encryption", buffer);
+
+  snprintf(buffer, sizeof buffer, "0x%02X", metadata_bits);
+  print_flag_line(stdout, "metadata", buffer);
+}
+
 void print_splat4DHeader(const Splat4DHeader *h) {
   printf("│  magic        0X%-10X │\n", h->magic);
   printf("│  version      %02d.%02d.%02d-%02d  │\n", h->version[0], h->version[1], h->version[2],
@@ -333,6 +472,7 @@ void print_splat4DHeader(const Splat4DHeader *h) {
   printf("│  frames       0X%-10X │\n", h->frames);
   printf("│  palette size 0X%-10X │\n", h->pSize);
   printf("│  flags        0X%-10X │\n", h->flags);
+  print_flags(h->flags);
   printf("│  idxs %-20" PRIu64 " │\n", header_total_indices(h));
   printf("│                            │\n");
 }
