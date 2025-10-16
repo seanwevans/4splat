@@ -226,6 +226,32 @@ static inline void crc32_update(crc32_t *c, const void *p, size_t n) {
 
 static inline uint32_t crc32_final(crc32_t *c) { return ~c->v; }
 
+static bool checked_mul_u64(uint64_t a, uint64_t b, uint64_t *out) {
+  if (!out)
+    return false;
+  if (b != 0 && a > UINT64_MAX / b)
+    return false;
+  *out = a * b;
+  return true;
+}
+
+bool header_total_indices_checked(const Splat4DHeader *h, uint64_t *total) {
+  if (!h || !total)
+    return false;
+
+  uint64_t dims[4] = {h->width, h->height, h->depth, h->frames};
+  uint64_t acc = 1;
+  for (size_t i = 0; i < 4; ++i) {
+    if (dims[i] == 0)
+      return false;
+    if (!checked_mul_u64(acc, dims[i], &acc))
+      return false;
+  }
+
+  *total = acc;
+  return true;
+}
+
 uint64_t header_total_indices(const Splat4DHeader *h) {
   return (uint64_t)h->width * (uint64_t)h->height * (uint64_t)h->depth * (uint64_t)h->frames;
 }
@@ -267,12 +293,14 @@ uint32_t compute_idxoffset_reverse(const Splat4DHeader *h) {
 }
 
 bool sanity_check_idxoffset_file(FILE *fp, const Splat4DHeader *h, const Splat4DFooter *f) {
+  (void)fp;
   uint64_t expect =
       (uint64_t)sizeof(Splat4DHeader) + (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
   return f->idxoffset == expect;
 }
 
 bool check_idxoffset_file(FILE *fp, const Splat4DHeader *h, const Splat4DFooter *f) {
+  (void)fp;
   uint64_t after_header =
       (uint64_t)sizeof(Splat4DHeader) + (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
   return after_header == (uint64_t)f->idxoffset;
@@ -369,7 +397,12 @@ bool write_splat4DPalette(FILE *fp, const Splat4DPalette *p, uint32_t count) {
 bool read_splat4DPalette(FILE *fp, Splat4DPalette *p, uint32_t count) {
   if (!fp || !p || count == 0)
     return false;
-  p->palette = malloc(count * sizeof(Splat4D));
+  uint64_t bytes64 = 0;
+  if (!checked_mul_u64((uint64_t)count, (uint64_t)sizeof(Splat4D), &bytes64) ||
+      bytes64 > SIZE_MAX)
+    return false;
+  size_t bytes = (size_t)bytes64;
+  p->palette = malloc(bytes);
   if (!p->palette)
     return false;
   if (fread(p->palette, sizeof(Splat4D), count, fp) != count) {
@@ -406,10 +439,15 @@ bool write_splat4DIndex(FILE *fp, const Splat4DIndex *i, uint64_t total) {
 bool read_splat4DIndex(FILE *fp, Splat4DIndex *i, uint64_t total) {
   if (!fp || !i || total == 0)
     return false;
-  i->index = malloc(total * sizeof(uint64_t));
+  uint64_t bytes64 = 0;
+  if (!checked_mul_u64(total, (uint64_t)sizeof(uint64_t), &bytes64) || bytes64 > SIZE_MAX)
+    return false;
+  size_t bytes = (size_t)bytes64;
+  i->index = malloc(bytes);
   if (!i->index)
     return false;
-  if (fread(i->index, sizeof(uint64_t), total, fp) != total) {
+  size_t total_count = (size_t)total;
+  if (fread(i->index, sizeof(uint64_t), total_count, fp) != total_count) {
     free(i->index);
     i->index = NULL;
     return false;
@@ -507,12 +545,35 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   if (!read_splat4DHeader(fp, &v->header))
     return false;
 
+  if (v->header.pSize == 0) {
+    fprintf(stderr, "❌ Invalid palette size\n");
+    return false;
+  }
+
+  uint64_t palette_bytes = 0;
+  if (!checked_mul_u64((uint64_t)v->header.pSize, (uint64_t)sizeof(Splat4D), &palette_bytes) ||
+      palette_bytes > SIZE_MAX) {
+    fprintf(stderr, "❌ Invalid palette size\n");
+    return false;
+  }
+
+  uint64_t total = 0;
+  if (!header_total_indices_checked(&v->header, &total)) {
+    fprintf(stderr, "❌ Invalid index count\n");
+    return false;
+  }
+
+  uint64_t index_bytes = 0;
+  if (!checked_mul_u64(total, (uint64_t)sizeof(uint64_t), &index_bytes) || index_bytes > SIZE_MAX) {
+    fprintf(stderr, "❌ Invalid index count\n");
+    return false;
+  }
+
   // Read palette
   if (!read_splat4DPalette(fp, &v->palette, v->header.pSize))
     return false;
 
   // Read index
-  uint64_t total = header_total_indices(&v->header);
   if (!read_splat4DIndex(fp, &v->index, total)) {
     free(v->palette.palette);
     v->palette.palette = NULL;
