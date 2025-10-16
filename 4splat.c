@@ -164,6 +164,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+  SPLAT4D_STREAM_CHUNK_SIZE = 1 << 15
+};
+
 typedef struct {
   float mu_x, sigma_x, mu_y, sigma_y, mu_z, sigma_z, mu_t, sigma_t, r, g, b, alpha;
 } Splat4D;
@@ -197,6 +201,8 @@ typedef struct {
   Splat4DFooter footer;
 } Splat4DVideo;
 
+uint64_t header_total_indices(const Splat4DHeader *h);
+
 // utils //
 typedef struct {
   uint32_t v;
@@ -226,33 +232,95 @@ static inline void crc32_update(crc32_t *c, const void *p, size_t n) {
 
 static inline uint32_t crc32_final(crc32_t *c) { return ~c->v; }
 
+// streaming helpers //
+typedef bool (*Splat4DChunkFn)(const uint8_t *chunk, size_t n, void *ctx);
+
+static bool splat4d_stream_block(const uint8_t *data, size_t len, size_t chunk,
+                                 Splat4DChunkFn fn, void *ctx) {
+  if (!data || len == 0)
+    return true;
+
+  if (chunk == 0)
+    chunk = SPLAT4D_STREAM_CHUNK_SIZE;
+
+  while (len > 0) {
+    size_t step = len < chunk ? len : chunk;
+    if (!fn(data, step, ctx))
+      return false;
+    data += step;
+    len -= step;
+  }
+  return true;
+}
+
+static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk,
+                                         Splat4DChunkFn fn, void *ctx) {
+  if (!v || !fn)
+    return false;
+
+  if (!splat4d_stream_block((const uint8_t *)&v->header, sizeof v->header, chunk, fn,
+                             ctx))
+    return false;
+
+  size_t palette_bytes = (size_t)v->header.pSize * sizeof(Splat4D);
+  if (palette_bytes > 0) {
+    if (!v->palette.palette)
+      return false;
+    if (!splat4d_stream_block((const uint8_t *)v->palette.palette, palette_bytes, chunk,
+                              fn, ctx))
+      return false;
+  }
+
+  uint64_t total = header_total_indices(&v->header);
+  size_t index_bytes = (size_t)total * sizeof(uint64_t);
+  if (index_bytes > 0) {
+    if (!v->index.index)
+      return false;
+    if (!splat4d_stream_block((const uint8_t *)v->index.index, index_bytes, chunk, fn,
+                              ctx))
+      return false;
+  }
+
+  return true;
+}
+
+bool stream_splat4DVideo(const Splat4DVideo *v, size_t chunk, Splat4DChunkFn fn, void *ctx) {
+  return splat4d_stream_video_payload(v, chunk, fn, ctx);
+}
+
+static bool splat4d_crc32_consumer(const uint8_t *chunk, size_t n, void *ctx) {
+  crc32_t *c = ctx;
+  crc32_update(c, chunk, n);
+  return true;
+}
+
+typedef struct {
+  FILE *fp;
+  crc32_t *crc;
+} Splat4DStreamFileCtx;
+
+static bool splat4d_stream_file_consumer(const uint8_t *chunk, size_t n, void *ctx) {
+  Splat4DStreamFileCtx *state = ctx;
+  if (fwrite(chunk, 1, n, state->fp) != n)
+    return false;
+  if (state->crc)
+    crc32_update(state->crc, chunk, n);
+  return true;
+}
+
 uint64_t header_total_indices(const Splat4DHeader *h) {
   return (uint64_t)h->width * (uint64_t)h->height * (uint64_t)h->depth * (uint64_t)h->frames;
 }
 
 uint32_t compute_video_checksum(const Splat4DVideo *v) {
-  uint64_t total = header_total_indices(&v->header);
-  size_t total_bytes =
-      sizeof(Splat4DHeader) + v->header.pSize * sizeof(Splat4D) + total * sizeof(uint64_t);
-
-  // Allocate a temporary contiguous buffer
-  uint8_t *buf = malloc(total_bytes);
-  if (!buf)
+  if (!v)
     return 0;
 
-  uint8_t *ptr = buf;
-
-  memcpy(ptr, &v->header, sizeof(Splat4DHeader));
-  ptr += sizeof(Splat4DHeader);
-
-  memcpy(ptr, v->palette.palette, v->header.pSize * sizeof(Splat4D));
-  ptr += v->header.pSize * sizeof(Splat4D);
-
-  memcpy(ptr, v->index.index, total * sizeof(uint64_t));
-
-  uint32_t crc = crc32(buf, total_bytes);
-  free(buf);
-  return crc;
+  crc32_t c;
+  crc32_init(&c);
+  if (!stream_splat4DVideo(v, SPLAT4D_STREAM_CHUNK_SIZE, splat4d_crc32_consumer, &c))
+    return 0;
+  return crc32_final(&c);
 }
 
 uint32_t compute_idxoffset_forward(const Splat4DHeader *h) {
@@ -470,25 +538,13 @@ bool write_splat4DVideo(FILE *fp, Splat4DVideo *v) {
     return false;
 
   // Compute header-derived values
-  uint64_t total = header_total_indices(&v->header);
   v->footer.idxoffset = sizeof(Splat4DHeader) + v->header.pSize * sizeof(Splat4D);
 
-  // Write everything but footer first
-  // long start_pos = ftell(fp);
-  if (!write_splat4DHeader(fp, &v->header))
-    return false;
-  if (!write_splat4DPalette(fp, &v->palette, v->header.pSize))
-    return false;
-  if (!write_splat4DIndex(fp, &v->index, total))
-    return false;
-  // long end_pos = ftell(fp);
-
-  // Compute CRC32 of everything before footer
   crc32_t c;
   crc32_init(&c);
-  crc32_update(&c, &v->header, sizeof v->header);
-  crc32_update(&c, v->palette.palette, v->header.pSize * sizeof(Splat4D));
-  crc32_update(&c, v->index.index, total * sizeof(uint64_t));
+  Splat4DStreamFileCtx ctx = {.fp = fp, .crc = &c};
+  if (!stream_splat4DVideo(v, SPLAT4D_STREAM_CHUNK_SIZE, splat4d_stream_file_consumer, &ctx))
+    return false;
   v->footer.checksum = crc32_final(&c);
 
   // Return to end of file and write footer
@@ -529,17 +585,8 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   }
 
   // ---- Validate footer ----
-  // 1. Recompute CRC
-  long current = ftell(fp);
-  fseek(fp, 0, SEEK_SET);
-  uint8_t *buf = malloc(v->footer.idxoffset + total * sizeof(uint64_t));
-  if (!buf)
-    return false;
-  fread(buf, 1, v->footer.idxoffset + total * sizeof(uint64_t), fp);
-  uint32_t recomputed = crc32(buf, v->footer.idxoffset + total * sizeof(uint64_t));
-  free(buf);
-  fseek(fp, current, SEEK_SET);
-
+  // 1. Recompute CRC from in-memory payload
+  uint32_t recomputed = compute_video_checksum(v);
   if (recomputed != v->footer.checksum) {
     fprintf(stderr, "❌ CRC mismatch: file=0x%08X recomputed=0x%08X\n", v->footer.checksum,
             recomputed);
