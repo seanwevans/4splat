@@ -212,7 +212,7 @@ static bool test_read_video_rejects_big_endian_flag(void) {
 
 static bool test_header_defaults_to_float32_precision(void) {
   Splat4DHeader header = create_splat4DHeader(/*width=*/2, /*height=*/2, /*depth=*/1,
-                                             /*frames=*/1, /*pSize=*/2, /*flags=*/0);
+                                              /*frames=*/1, /*pSize=*/2, /*flags=*/0);
   return (header.flags & SPLAT_FLAG_PRECISION_MASK) == SPLAT_FLAG_PRECISION_FLOAT32;
 }
 
