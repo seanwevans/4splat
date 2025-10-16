@@ -157,7 +157,9 @@
  │▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
  ╰───────────────────────────────────────────────────────────────────────╯*/
 
+#include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -863,42 +865,357 @@ void free_splat4DVideo(Splat4DVideo *v) {
 }
 
 #ifndef UNIT_TEST
-// main
-int main(void) {
-  const uint32_t width = 2;
-  const uint32_t height = 2;
-  const uint32_t depth = 1;
-  const uint32_t frames = 1;
-  const uint32_t palette_size = 2;
-  const uint32_t flags = 0;
-  // const uint32_t indicies = 4;
+typedef struct {
+  uint32_t width;
+  uint32_t height;
+  uint32_t depth;
+  uint32_t frames;
+  uint32_t palette_size;
+  uint32_t flags;
+  bool width_set;
+  bool height_set;
+  bool depth_set;
+  bool frames_set;
+  bool palette_size_set;
+  bool flags_set;
+} MetadataOptions;
 
-  Splat4DHeader head = create_splat4DHeader(width, height, depth, // width, height, depth
-                                            frames, palette_size, // frames, palette size
-                                            flags);               // flags
-  Splat4D splats[2] = {create_splat4D(0, 1, 2, 3, 4, 5, 6, 7, 0.5, 0.6, 0.7, 1.0),
-                       create_splat4D(1, 1, 2, 2, 3, 3, 4, 4, 0.8, 0.2, 0.1, 0.9)};
-  uint64_t idxs[4] = {0, 1, 0, 1};
-  Splat4DVideo video = create_splat4DVideo(head, splats, idxs);
+static void print_usage(FILE *stream) {
+  fprintf(stream,
+          "Usage:\n"
+          "  4splat encode --palette <palette.bin> --index <index.bin> --output <file.4spl> "
+          "--width <w> --height <h> --depth <d> --frames <f> [--palette-size <n>] [--flags <n>]\n"
+          "  4splat decode --input <file.4spl> [--palette <palette.bin>] [--index <index.bin>] "
+          "[--print] [--validate]\n");
+}
 
-  FILE *out = fopen("demo.4spl", "wb+");
-  write_splat4DVideo(out, &video);
-  fclose(out);
+static bool parse_u32(const char *arg, uint32_t *out) {
+  if (!arg || !out)
+    return false;
+  errno = 0;
+  char *end = NULL;
+  unsigned long value = strtoul(arg, &end, 10);
+  if (errno != 0 || !end || *end != '\0' || value > UINT32_MAX)
+    return false;
+  *out = (uint32_t)value;
+  return true;
+}
 
-  FILE *in = fopen("demo.4spl", "rb");
-  Splat4DVideo loaded;
-  if (read_splat4DVideo(in, &loaded)) {
-    print_splat4DVideo(&loaded);
-    printf("✅ File verified OK!\n");
-  } else {
-    fprintf(stderr, "❌ Verification failed.\n");
+static bool load_file_into_buffer(const char *path, size_t element_size, void **buffer,
+                                  uint64_t *count_out) {
+  if (!path || !buffer || !count_out)
+    return false;
+
+  FILE *fp = fopen(path, "rb");
+  if (!fp) {
+    fprintf(stderr, "❌ Unable to open '%s': %s\n", path, strerror(errno));
+    return false;
   }
-  fclose(in);
 
-  validate_splat4DVideo(&video);
+  if (fseek(fp, 0, SEEK_END) != 0) {
+    fprintf(stderr, "❌ Failed to seek '%s'\n", path);
+    fclose(fp);
+    return false;
+  }
 
-  free_splat4DVideo(&loaded);
+  long size = ftell(fp);
+  if (size < 0) {
+    fprintf(stderr, "❌ Failed to determine size of '%s'\n", path);
+    fclose(fp);
+    return false;
+  }
 
-  return 0;
+  if (size % (long)element_size != 0) {
+    fprintf(stderr, "❌ File '%s' is not aligned to element size %zu\n", path, element_size);
+    fclose(fp);
+    return false;
+  }
+
+  uint64_t count = (uint64_t)size / element_size;
+  if (count == 0) {
+    fprintf(stderr, "❌ File '%s' does not contain any entries\n", path);
+    fclose(fp);
+    return false;
+  }
+
+  if (fseek(fp, 0, SEEK_SET) != 0) {
+    fprintf(stderr, "❌ Failed to rewind '%s'\n", path);
+    fclose(fp);
+    return false;
+  }
+
+  void *data = malloc(count * element_size);
+  if (!data) {
+    fprintf(stderr, "❌ Out of memory while reading '%s'\n", path);
+    fclose(fp);
+    return false;
+  }
+
+  if (fread(data, element_size, count, fp) != count) {
+    fprintf(stderr, "❌ Failed to read '%s'\n", path);
+    free(data);
+    fclose(fp);
+    return false;
+  }
+
+  fclose(fp);
+  *buffer = data;
+  *count_out = count;
+  return true;
+}
+
+static bool load_palette_from_file(const char *path, Splat4D **palette_out, uint32_t *count_out) {
+  uint64_t count = 0;
+  void *buffer = NULL;
+  if (!load_file_into_buffer(path, sizeof(Splat4D), &buffer, &count))
+    return false;
+  if (count > UINT32_MAX) {
+    fprintf(stderr, "❌ Palette '%s' has too many entries (%" PRIu64 ")\n", path, count);
+    free(buffer);
+    return false;
+  }
+  *palette_out = buffer;
+  *count_out = (uint32_t)count;
+  return true;
+}
+
+static bool load_index_from_file(const char *path, uint64_t **index_out, uint64_t *count_out) {
+  return load_file_into_buffer(path, sizeof(uint64_t), (void **)index_out, count_out);
+}
+
+static bool save_buffer_to_file(const char *path, const void *buffer, size_t element_size,
+                                uint64_t count) {
+  if (!path || !buffer || element_size == 0 || count == 0)
+    return false;
+  FILE *fp = fopen(path, "wb");
+  if (!fp) {
+    fprintf(stderr, "❌ Unable to write '%s': %s\n", path, strerror(errno));
+    return false;
+  }
+  size_t written = fwrite(buffer, element_size, count, fp);
+  fclose(fp);
+  if (written != count) {
+    fprintf(stderr, "❌ Short write while writing '%s'\n", path);
+    return false;
+  }
+  return true;
+}
+
+static bool save_palette_to_file(const char *path, const Splat4DVideo *video) {
+  return save_buffer_to_file(path, video->palette.palette, sizeof(Splat4D), video->header.pSize);
+}
+
+static bool save_index_to_file(const char *path, const Splat4DVideo *video) {
+  return save_buffer_to_file(path, video->index.index, sizeof(uint64_t),
+                             header_total_indices(&video->header));
+}
+
+static bool parse_metadata_option(const char *name, const char *value, MetadataOptions *meta) {
+  if (strcmp(name, "--width") == 0) {
+    if (!parse_u32(value, &meta->width))
+      return false;
+    meta->width_set = true;
+  } else if (strcmp(name, "--height") == 0) {
+    if (!parse_u32(value, &meta->height))
+      return false;
+    meta->height_set = true;
+  } else if (strcmp(name, "--depth") == 0) {
+    if (!parse_u32(value, &meta->depth))
+      return false;
+    meta->depth_set = true;
+  } else if (strcmp(name, "--frames") == 0) {
+    if (!parse_u32(value, &meta->frames))
+      return false;
+    meta->frames_set = true;
+  } else if (strcmp(name, "--palette-size") == 0) {
+    if (!parse_u32(value, &meta->palette_size))
+      return false;
+    meta->palette_size_set = true;
+  } else if (strcmp(name, "--flags") == 0) {
+    if (!parse_u32(value, &meta->flags))
+      return false;
+    meta->flags_set = true;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+static int command_encode(int argc, char **argv) {
+  const char *palette_path = NULL;
+  const char *index_path = NULL;
+  const char *output_path = NULL;
+  MetadataOptions meta = {0};
+
+  for (int i = 0; i < argc; i++) {
+    const char *arg = argv[i];
+    if (strcmp(arg, "--palette") == 0 && i + 1 < argc) {
+      palette_path = argv[++i];
+    } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
+      index_path = argv[++i];
+    } else if (strcmp(arg, "--output") == 0 && i + 1 < argc) {
+      output_path = argv[++i];
+    } else if ((strcmp(arg, "--width") == 0 || strcmp(arg, "--height") == 0 ||
+                strcmp(arg, "--depth") == 0 || strcmp(arg, "--frames") == 0 ||
+                strcmp(arg, "--palette-size") == 0 || strcmp(arg, "--flags") == 0) &&
+               i + 1 < argc) {
+      if (!parse_metadata_option(arg, argv[++i], &meta)) {
+        fprintf(stderr, "❌ Invalid value for %s\n", arg);
+        return EXIT_FAILURE;
+      }
+    } else {
+      fprintf(stderr, "❌ Unknown or incomplete option '%s'\n", arg);
+      return EXIT_FAILURE;
+    }
+  }
+
+  if (!palette_path || !index_path || !output_path || !meta.width_set || !meta.height_set ||
+      !meta.depth_set || !meta.frames_set) {
+    fprintf(stderr, "❌ encode requires --palette, --index, --output, --width, --height, --depth, "
+                    "and --frames\n");
+    return EXIT_FAILURE;
+  }
+
+  Splat4D *palette = NULL;
+  uint32_t palette_count = 0;
+  if (!load_palette_from_file(palette_path, &palette, &palette_count))
+    return EXIT_FAILURE;
+
+  if (!meta.palette_size_set)
+    meta.palette_size = palette_count;
+
+  if (meta.palette_size != palette_count) {
+    fprintf(stderr, "❌ Palette size mismatch: option=%u file=%u\n", meta.palette_size,
+            palette_count);
+    free(palette);
+    return EXIT_FAILURE;
+  }
+
+  uint64_t *indices = NULL;
+  uint64_t index_count = 0;
+  if (!load_index_from_file(index_path, &indices, &index_count)) {
+    free(palette);
+    return EXIT_FAILURE;
+  }
+
+  uint64_t expected_indices =
+      (uint64_t)meta.width * (uint64_t)meta.height * (uint64_t)meta.depth * (uint64_t)meta.frames;
+  if (expected_indices != index_count) {
+    fprintf(stderr,
+            "❌ Index count mismatch: expected %" PRIu64 " (from dimensions) but file has %" PRIu64
+            " entries\n",
+            expected_indices, index_count);
+    free(palette);
+    free(indices);
+    return EXIT_FAILURE;
+  }
+
+  Splat4DHeader header = create_splat4DHeader(meta.width, meta.height, meta.depth, meta.frames,
+                                              meta.palette_size, meta.flags_set ? meta.flags : 0u);
+  Splat4DVideo video = create_splat4DVideo(header, palette, indices);
+
+  FILE *fp = fopen(output_path, "wb");
+  if (!fp) {
+    fprintf(stderr, "❌ Unable to create '%s': %s\n", output_path, strerror(errno));
+    free_splat4DVideo(&video);
+    return EXIT_FAILURE;
+  }
+
+  bool wrote = write_splat4DVideo(fp, &video);
+  fclose(fp);
+  free_splat4DVideo(&video);
+
+  if (!wrote) {
+    fprintf(stderr, "❌ Failed to write 4Splat file '%s'\n", output_path);
+    return EXIT_FAILURE;
+  }
+
+  printf("✅ Wrote 4Splat file to '%s'\n", output_path);
+  return EXIT_SUCCESS;
+}
+
+static int command_decode(int argc, char **argv) {
+  const char *input_path = NULL;
+  const char *palette_out = NULL;
+  const char *index_out = NULL;
+  bool print_summary = false;
+  bool do_validate = false;
+
+  for (int i = 0; i < argc; i++) {
+    const char *arg = argv[i];
+    if (strcmp(arg, "--input") == 0 && i + 1 < argc) {
+      input_path = argv[++i];
+    } else if (strcmp(arg, "--palette") == 0 && i + 1 < argc) {
+      palette_out = argv[++i];
+    } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
+      index_out = argv[++i];
+    } else if (strcmp(arg, "--print") == 0) {
+      print_summary = true;
+    } else if (strcmp(arg, "--validate") == 0) {
+      do_validate = true;
+    } else {
+      fprintf(stderr, "❌ Unknown or incomplete option '%s'\n", arg);
+      return EXIT_FAILURE;
+    }
+  }
+
+  if (!input_path) {
+    fprintf(stderr, "❌ decode requires --input <file.4spl>\n");
+    return EXIT_FAILURE;
+  }
+
+  FILE *fp = fopen(input_path, "rb");
+  if (!fp) {
+    fprintf(stderr, "❌ Unable to open '%s': %s\n", input_path, strerror(errno));
+    return EXIT_FAILURE;
+  }
+
+  Splat4DVideo video;
+  bool read_ok = read_splat4DVideo(fp, &video);
+  fclose(fp);
+
+  if (!read_ok) {
+    fprintf(stderr, "❌ Failed to read '%s'\n", input_path);
+    return EXIT_FAILURE;
+  }
+
+  if (do_validate && !validate_splat4DVideo(&video)) {
+    free_splat4DVideo(&video);
+    return EXIT_FAILURE;
+  }
+
+  if (print_summary)
+    print_splat4DVideo(&video);
+
+  if (palette_out && !save_palette_to_file(palette_out, &video)) {
+    free_splat4DVideo(&video);
+    return EXIT_FAILURE;
+  }
+
+  if (index_out && !save_index_to_file(index_out, &video)) {
+    free_splat4DVideo(&video);
+    return EXIT_FAILURE;
+  }
+
+  free_splat4DVideo(&video);
+  return EXIT_SUCCESS;
+}
+
+int main(int argc, char **argv) {
+  if (argc < 2) {
+    print_usage(stderr);
+    return EXIT_FAILURE;
+  }
+
+  const char *command = argv[1];
+  if (strcmp(command, "encode") == 0) {
+    return command_encode(argc - 2, argv + 2);
+  }
+  if (strcmp(command, "decode") == 0) {
+    return command_decode(argc - 2, argv + 2);
+  }
+
+  print_usage(stderr);
+  return EXIT_FAILURE;
 }
 #endif // UNIT_TEST
