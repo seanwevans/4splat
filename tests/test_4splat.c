@@ -2,6 +2,7 @@
 #define UNIT_TEST
 #endif
 #include "../4splat.c"
+#include <stddef.h>
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
@@ -164,6 +165,7 @@ static bool test_validate_fails_for_bad_footer_marker(void) {
 }
 
 static bool test_validate_fails_for_big_endian_flag(void) {
+static bool test_validate_detects_corrupted_index(void) {
   Splat4D palette[2];
   uint64_t indices[4];
   make_palette(palette);
@@ -214,6 +216,11 @@ static bool test_header_defaults_to_float32_precision(void) {
   Splat4DHeader header = create_splat4DHeader(/*width=*/2, /*height=*/2, /*depth=*/1,
                                               /*frames=*/1, /*pSize=*/2, /*flags=*/0);
   return (header.flags & SPLAT_FLAG_PRECISION_MASK) == SPLAT_FLAG_PRECISION_FLOAT32;
+
+  // Mutate index data without updating the footer checksum to simulate corruption.
+  video.index.index[0] ^= 1u;
+
+  return !validate_splat4DVideo(&video);
 }
 
 static bool test_write_and_read_round_trip(void) {
@@ -389,6 +396,21 @@ static bool test_read_footer_rejects_nulls(void) {
   return ok;
 }
 
+static bool test_read_footer_fails_on_short_file(void) {
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+
+  Splat4DFooter footer = create_splat4DFooter(&(Splat4DHeader){0});
+  fwrite(&footer, sizeof(uint8_t), sizeof(Splat4DFooter) - 1, fp);
+  rewind(fp);
+
+  Splat4DFooter out = {0};
+  bool failed = !read_splat4DFooter(fp, &out);
+  fclose(fp);
+  return failed;
+}
+
 static bool test_write_video_rejects_nulls(void) {
   Splat4D palette[2];
   uint64_t indices[4];
@@ -466,6 +488,38 @@ static bool test_read_video_fails_on_crc_mismatch(void) {
   return ok;
 }
 
+static bool test_read_video_fails_on_invalid_footer_marker(void) {
+  Splat4D palette_data[2];
+  uint64_t indices[4];
+  make_palette(palette_data);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette_data, indices);
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+
+  if (!write_splat4DVideo(fp, &video)) {
+    fclose(fp);
+    return false;
+  }
+
+  // Corrupt the footer terminator.
+  fseek(fp, -(long)sizeof(Splat4DFooter), SEEK_END);
+  fseek(fp, (long)offsetof(Splat4DFooter, end), SEEK_CUR);
+  uint32_t invalid_end = 0;
+  fwrite(&invalid_end, sizeof(uint32_t), 1, fp);
+  fflush(fp);
+  rewind(fp);
+
+  Splat4DVideo loaded;
+  memset(&loaded, 0, sizeof loaded);
+  bool failed = !read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  free_splat4DVideo(&loaded);
+  return failed;
+}
+
 static bool test_idxoffset_sanity_mismatch(void) {
   Splat4DHeader header = make_header();
   Splat4DFooter footer = create_splat4DFooter(&header);
@@ -491,6 +545,7 @@ static test_case TESTS[] = {
     {"validate_fails_for_bad_footer_marker", test_validate_fails_for_bad_footer_marker},
     {"validate_fails_for_big_endian_flag", test_validate_fails_for_big_endian_flag},
     {"validate_fails_for_unsupported_precision", test_validate_fails_for_unsupported_precision},
+    {"validate_detects_corrupted_index", test_validate_detects_corrupted_index},
     {"write_and_read_round_trip", test_write_and_read_round_trip},
     {"write_header_rejects_null_fp", test_write_header_rejects_null_fp},
     {"write_header_rejects_null_header", test_write_header_rejects_null_header},
@@ -504,11 +559,13 @@ static test_case TESTS[] = {
     {"read_index_fails_on_short_file", test_read_index_fails_on_short_file},
     {"write_footer_rejects_nulls", test_write_footer_rejects_nulls},
     {"read_footer_rejects_nulls", test_read_footer_rejects_nulls},
+    {"read_footer_fails_on_short_file", test_read_footer_fails_on_short_file},
     {"write_video_rejects_nulls", test_write_video_rejects_nulls},
     {"read_video_rejects_nulls", test_read_video_rejects_nulls},
     {"read_video_fails_on_truncated_index", test_read_video_fails_on_truncated_index},
     {"read_video_fails_on_crc_mismatch", test_read_video_fails_on_crc_mismatch},
     {"read_video_rejects_big_endian_flag", test_read_video_rejects_big_endian_flag},
+    {"read_video_fails_on_invalid_footer_marker", test_read_video_fails_on_invalid_footer_marker},
     {"idxoffset_sanity_mismatch", test_idxoffset_sanity_mismatch},
     {"header_defaults_to_float32_precision", test_header_defaults_to_float32_precision},
 };
