@@ -168,12 +168,329 @@ typedef struct {
   float mu_x, sigma_x, mu_y, sigma_y, mu_z, sigma_z, mu_t, sigma_t, r, g, b, alpha;
 } Splat4D;
 
+typedef enum {
+  SPLAT_ENDIAN_LITTLE = 0,
+  SPLAT_ENDIAN_BIG = 1,
+} SplatEndian;
+
+typedef enum {
+  SPLAT_SORT_UNSORTED = 0,
+  SPLAT_SORT_SORTED = 1,
+} SplatSortOrder;
+
+typedef enum {
+  SPLAT_PRECISION_FLOAT16 = 0,
+  SPLAT_PRECISION_FLOAT32 = 1,
+  SPLAT_PRECISION_FLOAT64 = 2,
+  SPLAT_PRECISION_FLOAT128 = 3,
+} SplatPrecision;
+
+typedef enum {
+  SPLAT_COMPRESSION_NONE = 0,
+  SPLAT_COMPRESSION_RUN_LENGTH = 1,
+  SPLAT_COMPRESSION_DEFLATE = 2,
+  SPLAT_COMPRESSION_RAR = 3,
+  SPLAT_COMPRESSION_LZO = 4,
+  SPLAT_COMPRESSION_ZLIB = 5,
+  SPLAT_COMPRESSION_BZIP2 = 6,
+  SPLAT_COMPRESSION_LZMA = 7,
+  SPLAT_COMPRESSION_ZPAQ = 8,
+  SPLAT_COMPRESSION_XZ = 9,
+  SPLAT_COMPRESSION_LZ4 = 10,
+  SPLAT_COMPRESSION_SNAPPY = 11,
+  SPLAT_COMPRESSION_LZHAM = 12,
+  SPLAT_COMPRESSION_BROTLI = 13,
+  SPLAT_COMPRESSION_LZFSE = 14,
+  SPLAT_COMPRESSION_ZSTD = 15,
+} SplatCompression;
+
+typedef enum {
+  SPLAT_INDEX_WIDTH_8 = 0,
+  SPLAT_INDEX_WIDTH_16 = 1,
+  SPLAT_INDEX_WIDTH_32 = 2,
+  SPLAT_INDEX_WIDTH_64 = 3,
+} SplatIndexWidth;
+
+typedef enum {
+  SPLAT_SHAPE_ISOTROPIC = 0,
+  SPLAT_SHAPE_AXIS_ALIGNED = 1,
+  SPLAT_SHAPE_FULL_COVARIANCE = 2,
+  SPLAT_SHAPE_RESERVED = 3,
+} SplatShape;
+
+typedef enum {
+  SPLAT_COLOR_SRGB = 0,
+  SPLAT_COLOR_LINEAR_SRGB = 1,
+  SPLAT_COLOR_OKLAB = 2,
+  SPLAT_COLOR_DISPLAY_P3 = 3,
+  SPLAT_COLOR_REC709 = 4,
+  SPLAT_COLOR_REC2020 = 5,
+  SPLAT_COLOR_DCI_P3 = 6,
+  SPLAT_COLOR_ACES_AP0 = 7,
+  SPLAT_COLOR_PROPHOTO_RGB = 8,
+  SPLAT_COLOR_REC2100 = 9,
+  SPLAT_COLOR_CIE_LAB = 10,
+  SPLAT_COLOR_CIE_XYZ_D65 = 11,
+  SPLAT_COLOR_ACESCG_AP1 = 12,
+  SPLAT_COLOR_REC601 = 13,
+  SPLAT_COLOR_CIE_XYZ_D50 = 14,
+  SPLAT_COLOR_CIE_XYZ_D65_ALT = 15,
+} SplatColorSpace;
+
+typedef enum {
+  SPLAT_INTERP_NONE = 0,
+  SPLAT_INTERP_NEAREST = 1,
+  SPLAT_INTERP_AXIS_ALIGNED = 2,
+  SPLAT_INTERP_SMOOTH = 3,
+  SPLAT_INTERP_LANCZOS = 4,
+  SPLAT_INTERP_GAUSSIAN = 5,
+  SPLAT_INTERP_CATMULL_ROM = 6,
+  SPLAT_INTERP_NURBS = 7,
+  SPLAT_INTERP_RBF = 8,
+  SPLAT_INTERP_OPTICAL_FLOW = 9,
+  SPLAT_INTERP_NEURAL = 10,
+  SPLAT_INTERP_AKIMA = 11,
+  SPLAT_INTERP_INVERSE_DISTANCE = 12,
+  SPLAT_INTERP_FOURIER = 13,
+  SPLAT_INTERP_MOVING_LEAST_SQUARES = 14,
+  SPLAT_INTERP_CUBIC_HERMITE = 15,
+} SplatInterpolation;
+
+typedef union {
+  uint32_t raw;
+  struct {
+    uint32_t endian : 1;
+    uint32_t sorted : 1;
+    uint32_t precision : 2;
+    uint32_t compression : 4;
+    uint32_t index_width : 2;
+    uint32_t splat_shape : 2;
+    uint32_t color_space : 4;
+    uint32_t interpolation : 4;
+    uint32_t reserved : 12;
+  } bits;
+} Splat4DFlags;
+
+_Static_assert(sizeof(Splat4DFlags) == sizeof(uint32_t),
+               "Splat4DFlags must occupy exactly four bytes");
+
+static inline Splat4DFlags splat4d_flags_from_raw(uint32_t raw) {
+  return (Splat4DFlags){.raw = raw};
+}
+
+static inline Splat4DFlags splat4d_flags_make(SplatEndian endian, SplatSortOrder sort_order,
+                                              SplatPrecision precision, SplatCompression compression,
+                                              SplatIndexWidth index_width, SplatShape shape,
+                                              SplatColorSpace color_space,
+                                              SplatInterpolation interpolation) {
+  Splat4DFlags flags = {.raw = 0};
+  flags.bits.endian = endian;
+  flags.bits.sorted = sort_order;
+  flags.bits.precision = precision;
+  flags.bits.compression = compression;
+  flags.bits.index_width = index_width;
+  flags.bits.splat_shape = shape;
+  flags.bits.color_space = color_space;
+  flags.bits.interpolation = interpolation;
+  return flags;
+}
+
+static inline Splat4DFlags splat4d_flags_default(void) {
+  return splat4d_flags_make(SPLAT_ENDIAN_LITTLE, SPLAT_SORT_UNSORTED, SPLAT_PRECISION_FLOAT32,
+                            SPLAT_COMPRESSION_NONE, SPLAT_INDEX_WIDTH_32, SPLAT_SHAPE_ISOTROPIC,
+                            SPLAT_COLOR_SRGB, SPLAT_INTERP_NONE);
+}
+
+static const char *splat_endian_name(SplatEndian e) {
+  switch (e) {
+  case SPLAT_ENDIAN_LITTLE:
+    return "Little-Endian";
+  case SPLAT_ENDIAN_BIG:
+    return "Big-Endian";
+  default:
+    return "Unknown";
+  }
+}
+
+static const char *splat_sort_order_name(SplatSortOrder order) {
+  switch (order) {
+  case SPLAT_SORT_UNSORTED:
+    return "Unsorted";
+  case SPLAT_SORT_SORTED:
+    return "Sorted";
+  default:
+    return "Unknown";
+  }
+}
+
+static const char *splat_precision_name(SplatPrecision precision) {
+  switch (precision) {
+  case SPLAT_PRECISION_FLOAT16:
+    return "Float16";
+  case SPLAT_PRECISION_FLOAT32:
+    return "Float32";
+  case SPLAT_PRECISION_FLOAT64:
+    return "Float64";
+  case SPLAT_PRECISION_FLOAT128:
+    return "Float128";
+  default:
+    return "Unknown";
+  }
+}
+
+static const char *splat_compression_name(SplatCompression compression) {
+  switch (compression) {
+  case SPLAT_COMPRESSION_NONE:
+    return "None";
+  case SPLAT_COMPRESSION_RUN_LENGTH:
+    return "Run Length";
+  case SPLAT_COMPRESSION_DEFLATE:
+    return "DEFLATE";
+  case SPLAT_COMPRESSION_RAR:
+    return "RAR";
+  case SPLAT_COMPRESSION_LZO:
+    return "LZO";
+  case SPLAT_COMPRESSION_ZLIB:
+    return "zlib";
+  case SPLAT_COMPRESSION_BZIP2:
+    return "bzip2";
+  case SPLAT_COMPRESSION_LZMA:
+    return "LZMA";
+  case SPLAT_COMPRESSION_ZPAQ:
+    return "ZPAQ";
+  case SPLAT_COMPRESSION_XZ:
+    return "XZ";
+  case SPLAT_COMPRESSION_LZ4:
+    return "LZ4";
+  case SPLAT_COMPRESSION_SNAPPY:
+    return "Snappy";
+  case SPLAT_COMPRESSION_LZHAM:
+    return "LZHAM";
+  case SPLAT_COMPRESSION_BROTLI:
+    return "Brotli";
+  case SPLAT_COMPRESSION_LZFSE:
+    return "LZFSE";
+  case SPLAT_COMPRESSION_ZSTD:
+    return "Zstd";
+  default:
+    return "Unknown";
+  }
+}
+
+static const char *splat_index_width_name(SplatIndexWidth width) {
+  switch (width) {
+  case SPLAT_INDEX_WIDTH_8:
+    return "1-byte";
+  case SPLAT_INDEX_WIDTH_16:
+    return "2-byte";
+  case SPLAT_INDEX_WIDTH_32:
+    return "4-byte";
+  case SPLAT_INDEX_WIDTH_64:
+    return "8-byte";
+  default:
+    return "Unknown";
+  }
+}
+
+static const char *splat_shape_name(SplatShape shape) {
+  switch (shape) {
+  case SPLAT_SHAPE_ISOTROPIC:
+    return "Isotropic";
+  case SPLAT_SHAPE_AXIS_ALIGNED:
+    return "Axis-Aligned";
+  case SPLAT_SHAPE_FULL_COVARIANCE:
+    return "Full Cov";
+  case SPLAT_SHAPE_RESERVED:
+    return "Reserved";
+  default:
+    return "Unknown";
+  }
+}
+
+static const char *splat_color_space_name(SplatColorSpace color_space) {
+  switch (color_space) {
+  case SPLAT_COLOR_SRGB:
+    return "sRGB";
+  case SPLAT_COLOR_LINEAR_SRGB:
+    return "Linear sRGB";
+  case SPLAT_COLOR_OKLAB:
+    return "OKLab";
+  case SPLAT_COLOR_DISPLAY_P3:
+    return "Display P3";
+  case SPLAT_COLOR_REC709:
+    return "Rec.709";
+  case SPLAT_COLOR_REC2020:
+    return "Rec.2020";
+  case SPLAT_COLOR_DCI_P3:
+    return "DCI-P3";
+  case SPLAT_COLOR_ACES_AP0:
+    return "ACES AP0";
+  case SPLAT_COLOR_PROPHOTO_RGB:
+    return "ProPhoto";
+  case SPLAT_COLOR_REC2100:
+    return "Rec.2100";
+  case SPLAT_COLOR_CIE_LAB:
+    return "CIE Lab";
+  case SPLAT_COLOR_CIE_XYZ_D65:
+    return "CIE XYZ D65";
+  case SPLAT_COLOR_ACESCG_AP1:
+    return "ACEScg AP1";
+  case SPLAT_COLOR_REC601:
+    return "Rec.601";
+  case SPLAT_COLOR_CIE_XYZ_D50:
+    return "CIE XYZ D50";
+  case SPLAT_COLOR_CIE_XYZ_D65_ALT:
+    return "CIE XYZ D65";
+  default:
+    return "Unknown";
+  }
+}
+
+static const char *splat_interpolation_name(SplatInterpolation interpolation) {
+  switch (interpolation) {
+  case SPLAT_INTERP_NONE:
+    return "None";
+  case SPLAT_INTERP_NEAREST:
+    return "Nearest";
+  case SPLAT_INTERP_AXIS_ALIGNED:
+    return "Axis-Aligned";
+  case SPLAT_INTERP_SMOOTH:
+    return "Smooth";
+  case SPLAT_INTERP_LANCZOS:
+    return "Lanczos";
+  case SPLAT_INTERP_GAUSSIAN:
+    return "Gaussian";
+  case SPLAT_INTERP_CATMULL_ROM:
+    return "Catmull-Rom";
+  case SPLAT_INTERP_NURBS:
+    return "NURBS";
+  case SPLAT_INTERP_RBF:
+    return "RBF";
+  case SPLAT_INTERP_OPTICAL_FLOW:
+    return "Optical Flow";
+  case SPLAT_INTERP_NEURAL:
+    return "Neural";
+  case SPLAT_INTERP_AKIMA:
+    return "Akima";
+  case SPLAT_INTERP_INVERSE_DISTANCE:
+    return "Inverse Distance";
+  case SPLAT_INTERP_FOURIER:
+    return "Fourier";
+  case SPLAT_INTERP_MOVING_LEAST_SQUARES:
+    return "Moving LS";
+  case SPLAT_INTERP_CUBIC_HERMITE:
+    return "Cubic Hermite";
+  default:
+    return "Unknown";
+  }
+}
+
 typedef struct {
   uint32_t magic;
   uint8_t version[4];
   uint32_t width, height, depth, frames;
   uint32_t pSize;
-  uint32_t flags;
+  Splat4DFlags flags;
 } Splat4DHeader;
 
 typedef struct {
@@ -312,7 +629,7 @@ void print_splat4D(const Splat4D *s, const uint32_t count) {
 
 // header
 Splat4DHeader create_splat4DHeader(uint32_t width, uint32_t height, uint32_t depth, uint32_t frames,
-                                   uint32_t pSize, uint32_t flags) {
+                                   uint32_t pSize, Splat4DFlags flags) {
   return (Splat4DHeader){.magic = 0x3453504C,
                          .version = {1, 0, 0, 0},
                          .width = width,
@@ -332,7 +649,20 @@ void print_splat4DHeader(const Splat4DHeader *h) {
   printf("│  depth        0X%-10X │\n", h->depth);
   printf("│  frames       0X%-10X │\n", h->frames);
   printf("│  palette size 0X%-10X │\n", h->pSize);
-  printf("│  flags        0X%-10X │\n", h->flags);
+  printf("│  flags        0X%-10X │\n", h->flags.raw);
+  printf("│    endian     %-14s │\n", splat_endian_name((SplatEndian)h->flags.bits.endian));
+  printf("│    sort       %-14s │\n", splat_sort_order_name((SplatSortOrder)h->flags.bits.sorted));
+  printf("│    precision  %-14s │\n",
+         splat_precision_name((SplatPrecision)h->flags.bits.precision));
+  printf("│    compress   %-14s │\n",
+         splat_compression_name((SplatCompression)h->flags.bits.compression));
+  printf("│    index      %-14s │\n",
+         splat_index_width_name((SplatIndexWidth)h->flags.bits.index_width));
+  printf("│    shape      %-14s │\n", splat_shape_name((SplatShape)h->flags.bits.splat_shape));
+  printf("│    color      %-14s │\n",
+         splat_color_space_name((SplatColorSpace)h->flags.bits.color_space));
+  printf("│    interp     %-14s │\n",
+         splat_interpolation_name((SplatInterpolation)h->flags.bits.interpolation));
   printf("│  idxs %-20" PRIu64 " │\n", header_total_indices(h));
   printf("│                            │\n");
 }
@@ -644,7 +974,7 @@ int main(void) {
   const uint32_t depth = 1;
   const uint32_t frames = 1;
   const uint32_t palette_size = 2;
-  const uint32_t flags = 0;
+  const Splat4DFlags flags = splat4d_flags_default();
   // const uint32_t indicies = 4;
 
   Splat4DHeader head = create_splat4DHeader(width, height, depth, // width, height, depth
