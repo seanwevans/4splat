@@ -1,8 +1,8 @@
 #ifndef UNIT_TEST
 #define UNIT_TEST
 #endif
-#include <stddef.h>
 #include "../4splat.c"
+#include <stddef.h>
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
