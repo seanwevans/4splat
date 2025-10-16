@@ -907,8 +907,7 @@ void print_splat4DHeader(const Splat4DHeader *h) {
   Splat4DFlags decoded = splat4d_flags_from_raw(h->flags);
   printf("│    endian     %-14s │\n", splat_endian_name((SplatEndian)decoded.bits.endian));
   printf("│    sort       %-14s │\n", splat_sort_order_name((SplatSortOrder)decoded.bits.sorted));
-  printf("│    precision  %-14s │\n",
-         splat_precision_name((SplatPrecision)decoded.bits.precision));
+  printf("│    precision  %-14s │\n", splat_precision_name((SplatPrecision)decoded.bits.precision));
   printf("│    compress   %-14s │\n",
          splat_compression_name((SplatCompression)decoded.bits.compression));
   printf("│    index      %-14s │\n",
