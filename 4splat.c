@@ -278,11 +278,10 @@ static inline Splat4DFlags splat4d_flags_from_raw(uint32_t raw) {
   return (Splat4DFlags){.raw = raw};
 }
 
-static inline Splat4DFlags splat4d_flags_make(SplatEndian endian, SplatSortOrder sort_order,
-                                              SplatPrecision precision, SplatCompression compression,
-                                              SplatIndexWidth index_width, SplatShape shape,
-                                              SplatColorSpace color_space,
-                                              SplatInterpolation interpolation) {
+static inline Splat4DFlags
+splat4d_flags_make(SplatEndian endian, SplatSortOrder sort_order, SplatPrecision precision,
+                   SplatCompression compression, SplatIndexWidth index_width, SplatShape shape,
+                   SplatColorSpace color_space, SplatInterpolation interpolation) {
   Splat4DFlags flags = {.raw = 0};
   flags.bits.endian = endian;
   flags.bits.sorted = sort_order;
