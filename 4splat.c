@@ -398,8 +398,7 @@ bool read_splat4DPalette(FILE *fp, Splat4DPalette *p, uint32_t count) {
   if (!fp || !p || count == 0)
     return false;
   uint64_t bytes64 = 0;
-  if (!checked_mul_u64((uint64_t)count, (uint64_t)sizeof(Splat4D), &bytes64) ||
-      bytes64 > SIZE_MAX)
+  if (!checked_mul_u64((uint64_t)count, (uint64_t)sizeof(Splat4D), &bytes64) || bytes64 > SIZE_MAX)
     return false;
   size_t bytes = (size_t)bytes64;
   p->palette = malloc(bytes);
