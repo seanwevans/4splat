@@ -16,7 +16,7 @@ typedef struct {
 
 static Splat4DHeader make_header(void) {
   return create_splat4DHeader(/*width=*/2, /*height=*/2, /*depth=*/1,
-                              /*frames=*/1, /*pSize=*/2, /*flags=*/0);
+                              /*frames=*/1, /*pSize=*/2, splat4d_flags_default());
 }
 
 static void make_palette(Splat4D palette[2]) {
