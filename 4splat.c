@@ -1141,6 +1141,10 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   if (recomputed != v->footer.checksum) {
     fprintf(stderr, "❌ CRC mismatch: file=0x%08X recomputed=0x%08X\n", v->footer.checksum,
             recomputed);
+    free(v->palette.palette);
+    free(v->index.index);
+    v->palette.palette = NULL;
+    v->index.index = NULL;
     return false;
   }
 
@@ -1161,6 +1165,10 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   // 3. Validate footer end marker
   if (v->footer.end != 0x4C505334) {
     fprintf(stderr, "❌ Invalid footer end marker\n");
+    free(v->palette.palette);
+    free(v->index.index);
+    v->palette.palette = NULL;
+    v->index.index = NULL;
     return false;
   }
 
