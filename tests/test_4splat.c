@@ -58,6 +58,21 @@ static bool test_idxoffset_helpers_agree(void) {
   return forward == reverse && forward == expected;
 }
 
+static bool test_idxoffset_reverse_handles_large_files(void) {
+  // Use a header whose index payload pushes the total file size beyond 4 GiB while the
+  // palette remains small enough that the true index offset still fits into 32 bits.
+  Splat4DHeader header =
+      create_splat4DHeader(/*width=*/1, /*height=*/1, /*depth=*/1, /*frames=*/600000000,
+                           /*pSize=*/1, /*flags=*/SPLAT_FLAG_PRECISION_FLOAT32);
+
+  uint64_t index_bytes = header_total_indices(&header) * sizeof(uint64_t);
+  uint32_t forward = compute_idxoffset_forward(&header);
+  uint32_t reverse = compute_idxoffset_reverse(&header);
+  uint64_t expected = (uint64_t)sizeof(Splat4DHeader) + (uint64_t)header.pSize * sizeof(Splat4D);
+
+  return index_bytes > UINT32_MAX && expected == (uint64_t)forward && reverse == forward;
+}
+
 static bool test_validate_succeeds_for_valid_video(void) {
   Splat4D palette[2];
   uint64_t indices[4];
@@ -538,6 +553,7 @@ static test_case TESTS[] = {
     {"crc32_known_value", test_crc32_known_value},
     {"checksum_matches_footer", test_compute_video_checksum_matches_footer},
     {"idxoffset_helpers_agree", test_idxoffset_helpers_agree},
+    {"idxoffset_reverse_handles_large_files", test_idxoffset_reverse_handles_large_files},
     {"validate_succeeds_for_valid_video", test_validate_succeeds_for_valid_video},
     {"validate_fails_for_bad_checksum", test_validate_fails_for_bad_checksum},
     {"validate_fails_for_null_video", test_validate_fails_for_null_video},
