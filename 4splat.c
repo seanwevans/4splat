@@ -649,7 +649,12 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
   if (!splat4d_stream_block((const uint8_t *)&v->header, sizeof v->header, chunk, fn, ctx))
     return false;
 
-  size_t palette_bytes = (size_t)v->header.pSize * sizeof(Splat4D);
+  uint64_t palette_bytes_u64;
+  if (!checked_mul_u64((uint64_t)v->header.pSize, sizeof(Splat4D), &palette_bytes_u64))
+    return false;
+  if (palette_bytes_u64 > SIZE_MAX)
+    return false;
+  size_t palette_bytes = (size_t)palette_bytes_u64;
   if (palette_bytes > 0) {
     if (!v->palette.palette)
       return false;
@@ -658,7 +663,12 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
   }
 
   uint64_t total = header_total_indices(&v->header);
-  size_t index_bytes = (size_t)total * sizeof(uint64_t);
+  uint64_t index_bytes_u64;
+  if (!checked_mul_u64(total, sizeof(uint64_t), &index_bytes_u64))
+    return false;
+  if (index_bytes_u64 > SIZE_MAX)
+    return false;
+  size_t index_bytes = (size_t)index_bytes_u64;
   if (index_bytes > 0) {
     if (!v->index.index)
       return false;
