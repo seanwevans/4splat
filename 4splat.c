@@ -1317,6 +1317,12 @@ static bool load_file_into_buffer(const char *path, size_t element_size, void **
     return false;
   }
 
+  if (element_size == 0 || count > SIZE_MAX / element_size) {
+    fprintf(stderr, "❌ File '%s' is too large to load into memory\n", path);
+    fclose(fp);
+    return false;
+  }
+
   void *data = malloc(count * element_size);
   if (!data) {
     fprintf(stderr, "❌ Out of memory while reading '%s'\n", path);
