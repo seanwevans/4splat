@@ -1037,7 +1037,7 @@ Splat4DFooter create_splat4DFooter(const Splat4DHeader *h) {
 void print_splat4DFooter(const Splat4DFooter *f) {
   printf("├ Footer ──────────────      │\n");
   printf("│    checksum  0x%08X    │\n", f->checksum);
-  printf("│    idxoffset 0x%08lX   │\n", f->idxoffset);
+  printf("│    idxoffset 0x%08" PRIX64 "   │\n", f->idxoffset);
   printf("│    end       0x%08X    │\n", f->end);
 }
 
