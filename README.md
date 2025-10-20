@@ -202,3 +202,26 @@
 | `read_video_fails_on_invalid_footer_marker` | Ensures video reading fails when the footer terminator is corrupted. |
 | `idxoffset_sanity_mismatch` | Checks the idxoffset sanity helpers catch mismatched offsets between header and footer. |
 | `header_defaults_to_float32_precision` | Verifies header construction defaults the precision flag to float32 when unspecified. |
+
+## Palette Explorer
+
+An exploratory visualization tool lives in `tools/visualize_4splat.py`. It parses a
+`.4spl` video, reconstructs frames using the stored palette, and renders an
+interactive Matplotlib dashboard featuring:
+
+* Reconstructed RGB frames for the active palette entries.
+* Heat-map slices that show how palette indices are distributed across space.
+* Scatter markers for each Gaussian "splat" centered at `(μx, μy)` with marker
+  sizes proportional to how close their temporal mean `(μt)` is to the selected
+  frame.
+* Checkboxes to toggle the most-used palette entries on and off for quick
+  reconstruction experiments.
+
+Launch it with:
+
+```bash
+python tools/visualize_4splat.py path/to/video.4spl
+```
+
+Use the sliders at the bottom to step through time and depth slices, and the
+checkboxes on the left to enable or disable palette slots.
