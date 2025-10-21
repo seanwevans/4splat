@@ -1,3 +1,6 @@
+<img width="256" alt="splat!" src="https://github.com/user-attachments/assets/63774bbb-7322-4296-b1f4-9be2b8741221" />
+
+
 ```
   ╭ .4spl File Format ╮
 ╭─╯                   ╰───────────────────────────────────────────────────╮
