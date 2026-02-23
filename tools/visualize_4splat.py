@@ -10,11 +10,9 @@ builds an interactive matplotlib dashboard.  The viewer shows:
 * Checkboxes that allow enabling/disabling the most used palette entries to
   observe how they contribute to the reconstruction.
 
-Example usage::
-
+Example usage:
     python tools/visualize_4splat.py path/to/video.4spl
 
-The tool requires NumPy and Matplotlib.
 """
 
 from __future__ import annotations
@@ -34,7 +32,7 @@ from matplotlib.widgets import CheckButtons, Slider
 HEADER_STRUCT = struct.Struct("<4s4B6I")
 PALETTE_ENTRY_FLOATS = 12
 PALETTE_ENTRY_SIZE = PALETTE_ENTRY_FLOATS * 4
-FOOTER_STRUCT = struct.Struct("<QI4s")
+FOOTER_STRUCT = struct.Struct("<I4xQ4s4x")
 INDEX_WIDTH_LOOKUP = {0: 1, 1: 2, 2: 4, 3: 8}
 
 
@@ -115,10 +113,14 @@ class FourSplatVideo:
         return self.palette_rgba[:, 3]
 
     def palette_means(self) -> np.ndarray:
-        return np.array([entry.spatial_mu() for entry in self.palette], dtype=np.float32)
+        return np.array(
+            [entry.spatial_mu() for entry in self.palette], dtype=np.float32
+        )
 
     def palette_temporal(self) -> np.ndarray:
-        return np.array([[entry.mu_t, entry.sigma_t] for entry in self.palette], dtype=np.float32)
+        return np.array(
+            [[entry.mu_t, entry.sigma_t] for entry in self.palette], dtype=np.float32
+        )
 
 
 class FourSplatParser:
@@ -133,14 +135,18 @@ class FourSplatParser:
             raise ValueError("File too small to be a valid 4Splat container")
 
         header = self._parse_header(data)
-        palette, palette_bytes = self._parse_palette(data, HEADER_STRUCT.size, header.palette_size)
+        palette, palette_bytes = self._parse_palette(
+            data, HEADER_STRUCT.size, header.palette_size
+        )
         indices, idx_bytes = self._parse_indices(
             data,
             HEADER_STRUCT.size + palette_bytes,
             header.total_voxels,
             header.index_bytes,
         )
-        footer = self._parse_footer(data, HEADER_STRUCT.size + palette_bytes + idx_bytes)
+        footer = self._parse_footer(
+            data, HEADER_STRUCT.size + palette_bytes + idx_bytes
+        )
 
         frames = header.frames
         depth = header.depth
@@ -157,12 +163,14 @@ class FourSplatParser:
         version = unpacked[1:5]
         width, height, depth, frames, palette_size, flags = unpacked[5:11]
 
-        if magic != b"4SPL":
+        if magic != b"LPS4":
             raise ValueError(f"Unexpected magic: {magic!r}")
         if version[0] != 1:
             raise ValueError(f"Unsupported major version: {version[0]}")
 
-        return FourSplatHeader(magic, version, width, height, depth, frames, palette_size, flags)
+        return FourSplatHeader(
+            magic, version, width, height, depth, frames, palette_size, flags
+        )
 
     def _parse_palette(
         self, data: bytes, offset: int, palette_size: int
@@ -174,7 +182,9 @@ class FourSplatParser:
             raise ValueError("Palette data truncated")
 
         palette_buffer = memoryview(data)[offset:end]
-        floats = np.frombuffer(palette_buffer, dtype="<f4", count=palette_size * PALETTE_ENTRY_FLOATS)
+        floats = np.frombuffer(
+            palette_buffer, dtype="<f4", count=palette_size * PALETTE_ENTRY_FLOATS
+        )
         floats = floats.reshape((palette_size, PALETTE_ENTRY_FLOATS))
 
         for row in floats:
@@ -213,8 +223,10 @@ class FourSplatParser:
     def _parse_footer(self, data: bytes, offset: int) -> Tuple[int, int]:
         if len(data) < offset + FOOTER_STRUCT.size:
             raise ValueError("Footer truncated")
-        idxoffset, checksum, end_ascii = FOOTER_STRUCT.unpack_from(data, offset)
-        if end_ascii != b"LPS4":
+
+        checksum, idxoffset, end_ascii = FOOTER_STRUCT.unpack_from(data, offset)
+
+        if end_ascii != b"4SPL":
             raise ValueError(f"Unexpected footer terminator: {end_ascii!r}")
         return idxoffset, checksum
 
@@ -261,8 +273,16 @@ class PaletteViewer:
 
         self.ax_heat.set_title("Palette Assignment Heat-map")
         cmap = self._build_palette_colormap()
-        self.heat_image = self.ax_heat.imshow(heat_slice, origin="lower", cmap=cmap, vmin=0, vmax=len(self.video.palette) - 1)
-        self.scatter = self.ax_heat.scatter([], [], s=0, c="white", edgecolor="black", linewidths=0.5, alpha=0.85)
+        self.heat_image = self.ax_heat.imshow(
+            heat_slice,
+            origin="lower",
+            cmap=cmap,
+            vmin=0,
+            vmax=len(self.video.palette) - 1,
+        )
+        self.scatter = self.ax_heat.scatter(
+            [], [], s=0, c="white", edgecolor="black", linewidths=0.5, alpha=0.85
+        )
         self.ax_heat.set_xlim(-0.5, self.video.header.width - 0.5)
         self.ax_heat.set_ylim(-0.5, self.video.header.height - 0.5)
         self.ax_heat.invert_yaxis()
@@ -291,8 +311,22 @@ class PaletteViewer:
         ax_frame_slider = plt.axes([0.32, 0.1, 0.6, 0.03], facecolor=axcolor)
         ax_depth_slider = plt.axes([0.32, 0.05, 0.6, 0.03], facecolor=axcolor)
 
-        self.frame_slider = Slider(ax_frame_slider, "Frame", 0, self.video.header.frames - 1, valinit=0, valstep=1)
-        self.depth_slider = Slider(ax_depth_slider, "Depth", 0, self.video.header.depth - 1, valinit=0, valstep=1)
+        self.frame_slider = Slider(
+            ax_frame_slider,
+            "Frame",
+            0,
+            self.video.header.frames - 1,
+            valinit=0,
+            valstep=1,
+        )
+        self.depth_slider = Slider(
+            ax_depth_slider,
+            "Depth",
+            0,
+            self.video.header.depth - 1,
+            valinit=0,
+            valstep=1,
+        )
 
         self.frame_slider.on_changed(lambda val: self._update_display())
         self.depth_slider.on_changed(lambda val: self._update_display())
@@ -306,7 +340,9 @@ class PaletteViewer:
         rax = plt.axes([0.05, 0.35, 0.22, bbox_height], facecolor="whitesmoke")
         labels = []
         states: List[bool] = []
-        counts = np.bincount(self.video.indices.ravel().astype(np.int64), minlength=palette_count)
+        counts = np.bincount(
+            self.video.indices.ravel().astype(np.int64), minlength=palette_count
+        )
         total = counts.sum() if counts.sum() > 0 else 1
 
         for entry_id, active in self.active_entries.items():
