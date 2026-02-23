@@ -168,14 +168,12 @@
 
 enum {
   SPLAT_FLAG_ENDIAN_BIG = 1u << 0,
-
   SPLAT_FLAG_PRECISION_SHIFT = 2,
   SPLAT_FLAG_PRECISION_MASK = 0x3u << SPLAT_FLAG_PRECISION_SHIFT,
   SPLAT_FLAG_PRECISION_FLOAT16 = 0x0u << SPLAT_FLAG_PRECISION_SHIFT,
   SPLAT_FLAG_PRECISION_FLOAT32 = 0x1u << SPLAT_FLAG_PRECISION_SHIFT,
   SPLAT_FLAG_PRECISION_FLOAT64 = 0x2u << SPLAT_FLAG_PRECISION_SHIFT,
   SPLAT_FLAG_PRECISION_FLOAT128 = 0x3u << SPLAT_FLAG_PRECISION_SHIFT,
-
   SPLAT_FLAG_SUPPORTED_MASK = SPLAT_FLAG_ENDIAN_BIG | SPLAT_FLAG_PRECISION_MASK,
 };
 
@@ -641,6 +639,17 @@ uint64_t header_total_indices(const Splat4DHeader *h) {
   return (uint64_t)h->width * (uint64_t)h->height * (uint64_t)h->depth * (uint64_t)h->frames;
 }
 
+static uint8_t get_index_width_bytes(uint32_t flags) {
+  uint32_t w = (flags >> 8) & 0x3u;
+  if (w == SPLAT_INDEX_WIDTH_8)
+    return 1;
+  if (w == SPLAT_INDEX_WIDTH_16)
+    return 2;
+  if (w == SPLAT_INDEX_WIDTH_32)
+    return 4;
+  return 8; // SPLAT_INDEX_WIDTH_64
+}
+
 static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Splat4DChunkFn fn,
                                          void *ctx) {
   if (!v || !fn)
@@ -654,6 +663,7 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
     return false;
   if (palette_bytes_u64 > SIZE_MAX)
     return false;
+
   size_t palette_bytes = (size_t)palette_bytes_u64;
   if (palette_bytes > 0) {
     if (!v->palette.palette)
@@ -663,17 +673,52 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
   }
 
   uint64_t total = header_total_indices(&v->header);
+  uint8_t idx_width = get_index_width_bytes(v->header.flags);
   uint64_t index_bytes_u64;
-  if (!checked_mul_u64(total, sizeof(uint64_t), &index_bytes_u64))
+
+  if (!checked_mul_u64(total, idx_width, &index_bytes_u64))
     return false;
   if (index_bytes_u64 > SIZE_MAX)
     return false;
+
   size_t index_bytes = (size_t)index_bytes_u64;
   if (index_bytes > 0) {
     if (!v->index.index)
       return false;
-    if (!splat4d_stream_block((const uint8_t *)v->index.index, index_bytes, chunk, fn, ctx))
-      return false;
+
+    if (idx_width == 8) {
+      if (!splat4d_stream_block((const uint8_t *)v->index.index, index_bytes, chunk, fn, ctx))
+        return false;
+    } else {
+      // Pack the 64-bit array down to the requested width dynamically in chunks
+      uint8_t pack_buf[SPLAT4D_STREAM_CHUNK_SIZE];
+      uint64_t items_per_chunk = SPLAT4D_STREAM_CHUNK_SIZE / idx_width;
+      uint64_t items_streamed = 0;
+
+      while (items_streamed < total) {
+        uint64_t to_pack = total - items_streamed;
+        if (to_pack > items_per_chunk)
+          to_pack = items_per_chunk;
+
+        if (idx_width == 1) {
+          uint8_t *p = (uint8_t *)pack_buf;
+          for (uint64_t i = 0; i < to_pack; i++)
+            p[i] = (uint8_t)v->index.index[items_streamed + i];
+        } else if (idx_width == 2) {
+          uint16_t *p = (uint16_t *)pack_buf;
+          for (uint64_t i = 0; i < to_pack; i++)
+            p[i] = (uint16_t)v->index.index[items_streamed + i];
+        } else if (idx_width == 4) {
+          uint32_t *p = (uint32_t *)pack_buf;
+          for (uint64_t i = 0; i < to_pack; i++)
+            p[i] = (uint32_t)v->index.index[items_streamed + i];
+        }
+
+        if (!fn(pack_buf, (size_t)(to_pack * idx_width), ctx))
+          return false;
+        items_streamed += to_pack;
+      }
+    }
   }
 
   return true;
@@ -722,7 +767,8 @@ uint32_t compute_idxoffset_reverse(const Splat4DHeader *h) {
   uint64_t total = header_total_indices(h);
   uint64_t header_bytes = sizeof(Splat4DHeader);
   uint64_t palette_bytes = (uint64_t)h->pSize * sizeof(Splat4D);
-  uint64_t index_bytes = total * sizeof(uint64_t);
+  uint8_t idx_width = get_index_width_bytes(h->flags);
+  uint64_t index_bytes = total * idx_width;
   uint64_t footer_bytes = sizeof(Splat4DFooter);
   uint64_t filesize = header_bytes + palette_bytes + index_bytes + footer_bytes;
   uint64_t offset = filesize - (footer_bytes + index_bytes);
@@ -1000,15 +1046,48 @@ void print_splat4DIndex(const Splat4DVideo *v) {
   }
 }
 
-bool write_splat4DIndex(FILE *fp, const Splat4DIndex *i, uint64_t total) {
+bool write_splat4DIndex(FILE *fp, const Splat4DIndex *i, uint64_t total, uint32_t flags) {
   if (!fp || !i || !i->index || total == 0)
     return false;
-  return fwrite(i->index, sizeof(uint64_t), total, fp) == total;
+
+  uint8_t idx_width = get_index_width_bytes(flags);
+  if (idx_width == 8) {
+    return fwrite(i->index, sizeof(uint64_t), total, fp) == total;
+  } else {
+    uint8_t pack_buf[SPLAT4D_STREAM_CHUNK_SIZE];
+    uint64_t items_per_chunk = SPLAT4D_STREAM_CHUNK_SIZE / idx_width;
+    uint64_t items_written = 0;
+    while (items_written < total) {
+      uint64_t to_pack = total - items_written;
+      if (to_pack > items_per_chunk)
+        to_pack = items_per_chunk;
+
+      if (idx_width == 1) {
+        uint8_t *p = (uint8_t *)pack_buf;
+        for (uint64_t k = 0; k < to_pack; k++)
+          p[k] = (uint8_t)i->index[items_written + k];
+      } else if (idx_width == 2) {
+        uint16_t *p = (uint16_t *)pack_buf;
+        for (uint64_t k = 0; k < to_pack; k++)
+          p[k] = (uint16_t)i->index[items_written + k];
+      } else if (idx_width == 4) {
+        uint32_t *p = (uint32_t *)pack_buf;
+        for (uint64_t k = 0; k < to_pack; k++)
+          p[k] = (uint32_t)i->index[items_written + k];
+      }
+
+      if (fwrite(pack_buf, idx_width, (size_t)to_pack, fp) != (size_t)to_pack)
+        return false;
+      items_written += to_pack;
+    }
+  }
+  return true;
 }
 
-bool read_splat4DIndex(FILE *fp, Splat4DIndex *i, uint64_t total) {
+bool read_splat4DIndex(FILE *fp, Splat4DIndex *i, uint64_t total, uint32_t flags) {
   if (!fp || !i || total == 0)
     return false;
+
   uint64_t bytes64 = 0;
   if (!checked_mul_u64(total, (uint64_t)sizeof(uint64_t), &bytes64) || bytes64 > SIZE_MAX)
     return false;
@@ -1016,11 +1095,45 @@ bool read_splat4DIndex(FILE *fp, Splat4DIndex *i, uint64_t total) {
   i->index = malloc(bytes);
   if (!i->index)
     return false;
-  size_t total_count = (size_t)total;
-  if (fread(i->index, sizeof(uint64_t), total_count, fp) != total_count) {
-    free(i->index);
-    i->index = NULL;
-    return false;
+
+  uint8_t idx_width = get_index_width_bytes(flags);
+  if (idx_width == 8) {
+    size_t total_count = (size_t)total;
+    if (fread(i->index, sizeof(uint64_t), total_count, fp) != total_count) {
+      free(i->index);
+      i->index = NULL;
+      return false;
+    }
+  } else {
+    uint8_t pack_buf[SPLAT4D_STREAM_CHUNK_SIZE];
+    uint64_t items_per_chunk = SPLAT4D_STREAM_CHUNK_SIZE / idx_width;
+    uint64_t items_read = 0;
+    while (items_read < total) {
+      uint64_t to_read = total - items_read;
+      if (to_read > items_per_chunk)
+        to_read = items_per_chunk;
+
+      if (fread(pack_buf, idx_width, (size_t)to_read, fp) != (size_t)to_read) {
+        free(i->index);
+        i->index = NULL;
+        return false;
+      }
+
+      if (idx_width == 1) {
+        uint8_t *p = (uint8_t *)pack_buf;
+        for (uint64_t k = 0; k < to_read; k++)
+          i->index[items_read + k] = p[k];
+      } else if (idx_width == 2) {
+        uint16_t *p = (uint16_t *)pack_buf;
+        for (uint64_t k = 0; k < to_read; k++)
+          i->index[items_read + k] = p[k];
+      } else if (idx_width == 4) {
+        uint32_t *p = (uint32_t *)pack_buf;
+        for (uint64_t k = 0; k < to_read; k++)
+          i->index[items_read + k] = p[k];
+      }
+      items_read += to_read;
+    }
   }
   return true;
 }
@@ -1134,7 +1247,7 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
     return false;
 
   // Read index
-  if (!read_splat4DIndex(fp, &v->index, total)) {
+  if (!read_splat4DIndex(fp, &v->index, total, v->header.flags)) {
     free(v->palette.palette);
     v->palette.palette = NULL;
     return false;
