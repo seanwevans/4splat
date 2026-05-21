@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>4SPLAT Demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 900px; }
+    canvas { border: 1px solid #ddd; image-rendering: pixelated; width: 512px; height: 512px; }
+    .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+    code { background: #f6f8fa; padding: 0.2rem 0.4rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>4SPLAT Browser Demo</h1>
+  <p>This page renders a tiny synthetic 4D palette-coded scene frame-by-frame in the browser.</p>
+  <div class="row">
+    <label for="frame">Frame</label>
+    <input id="frame" type="range" min="0" max="31" value="0" />
+    <span id="label">0</span>
+  </div>
+  <canvas id="view" width="64" height="64"></canvas>
+  <p>Repository: <code>4splat</code>. This is a static GitHub Pages demo, no backend required.</p>
+
+  <script>
+    const width = 64, height = 64, frames = 32;
+    const palette = [
+      [0, 0, 0],
+      [255, 76, 76],
+      [76, 180, 255],
+      [120, 255, 120],
+      [255, 232, 120],
+      [210, 120, 255],
+    ];
+
+    const canvas = document.getElementById('view');
+    const ctx = canvas.getContext('2d');
+    const slider = document.getElementById('frame');
+    const label = document.getElementById('label');
+
+    function gaussian(x, y, cx, cy, sigma) {
+      const dx = x - cx, dy = y - cy;
+      return Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+    }
+
+    function render(t) {
+      const image = ctx.createImageData(width, height);
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const nx = x / width, ny = y / height;
+          const p0 = gaussian(nx, ny, 0.2 + 0.6 * (t / (frames - 1)), 0.3, 0.09);
+          const p1 = gaussian(nx, ny, 0.8 - 0.6 * (t / (frames - 1)), 0.7, 0.10);
+          const p2 = gaussian(nx, ny, 0.5, 0.2 + 0.5 * Math.sin(t * 0.2), 0.08);
+          const p3 = gaussian(nx, ny, 0.5 + 0.25 * Math.cos(t * 0.3), 0.5, 0.12);
+
+          const scores = [0.05, p0, p1, p2, p3, (p0 + p1 + p2 + p3) * 0.5];
+          let idx = 0;
+          for (let i = 1; i < scores.length; i++) if (scores[i] > scores[idx]) idx = i;
+
+          const [r, g, b] = palette[idx];
+          const o = (y * width + x) * 4;
+          image.data[o] = r;
+          image.data[o + 1] = g;
+          image.data[o + 2] = b;
+          image.data[o + 3] = 255;
+        }
+      }
+      ctx.putImageData(image, 0, 0);
+      label.textContent = String(t);
+    }
+
+    slider.addEventListener('input', () => render(Number(slider.value)));
+    render(0);
+  </script>
+</body>
+</html>

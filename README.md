@@ -228,3 +228,12 @@ python tools/visualize_4splat.py path/to/video.4spl
 
 Use the sliders at the bottom to step through time and depth slices, and the
 checkboxes on the left to enable or disable palette slots.
+
+## GitHub Pages Demo
+
+This repository includes a static browser demo at `docs/index.html` and a
+GitHub Actions workflow (`.github/workflows/deploy-pages.yml`) that deploys the
+`docs/` folder to GitHub Pages on pushes to `main`.
+
+After merging to `main`, enable **Settings → Pages → Build and deployment → GitHub Actions**
+if not already enabled.
