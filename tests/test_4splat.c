@@ -359,14 +359,14 @@ static bool test_write_index_rejects_nulls(void) {
   make_indices(indices);
   Splat4DIndex index = create_splat4DIndex(indices);
   bool all_failed = true;
-  all_failed &= !write_splat4DIndex(NULL, &index, 4);
+  all_failed &= !write_splat4DIndex(NULL, &index, 4, SPLAT_FLAG_PRECISION_FLOAT32);
   FILE *fp = tmpfile();
   if (!fp)
     return false;
-  all_failed &= !write_splat4DIndex(fp, NULL, 4);
+  all_failed &= !write_splat4DIndex(fp, NULL, 4, SPLAT_FLAG_PRECISION_FLOAT32);
   Splat4DIndex empty = create_splat4DIndex(NULL);
-  all_failed &= !write_splat4DIndex(fp, &empty, 4);
-  all_failed &= !write_splat4DIndex(fp, &index, 0);
+  all_failed &= !write_splat4DIndex(fp, &empty, 4, SPLAT_FLAG_PRECISION_FLOAT32);
+  all_failed &= !write_splat4DIndex(fp, &index, 0, SPLAT_FLAG_PRECISION_FLOAT32);
   fclose(fp);
   return all_failed;
 }
@@ -376,9 +376,9 @@ static bool test_read_index_rejects_invalid_inputs(void) {
   FILE *fp = tmpfile();
   if (!fp)
     return false;
-  bool fail_fp = !read_splat4DIndex(NULL, &index, 4);
-  bool fail_index = !read_splat4DIndex(fp, NULL, 4);
-  bool fail_count = !read_splat4DIndex(fp, &index, 0);
+  bool fail_fp = !read_splat4DIndex(NULL, &index, 4, SPLAT_FLAG_PRECISION_FLOAT32);
+  bool fail_index = !read_splat4DIndex(fp, NULL, 4, SPLAT_FLAG_PRECISION_FLOAT32);
+  bool fail_count = !read_splat4DIndex(fp, &index, 0, SPLAT_FLAG_PRECISION_FLOAT32);
   fclose(fp);
   return fail_fp && fail_index && fail_count;
 }
@@ -387,11 +387,11 @@ static bool test_read_index_fails_on_short_file(void) {
   FILE *fp = tmpfile();
   if (!fp)
     return false;
-  uint64_t value = 42;
-  fwrite(&value, sizeof(uint64_t), 1, fp);
+  uint8_t partial = 0x2A;
+  fwrite(&partial, sizeof(uint8_t), 1, fp);
   rewind(fp);
   Splat4DIndex index = {.index = NULL};
-  bool ok = !read_splat4DIndex(fp, &index, 4) && index.index == NULL;
+  bool ok = !read_splat4DIndex(fp, &index, 4, SPLAT_FLAG_PRECISION_FLOAT32) && index.index == NULL;
   fclose(fp);
   return ok;
 }
