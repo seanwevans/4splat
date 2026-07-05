@@ -5,7 +5,7 @@
   ╭ .4spl File Format ╮
 ╭─╯                   ╰───────────────────────────────────────────────────╮
 │ The 4Splat Codec is a palette-based, lossless video compression format. │
-│ It generalizes indexed-color images to 3D and 4D spatial-temporal data: │
+│ It generalizes indexed-color images to 3D and 4D spatiotemporal data:   │
 │ (x, y, z, frame). Pixels across all frames are compressed into the      │
 │ global color palette, and each pixel stores an index into this          │
 │ palette. All values are little-endian and indices are row-major order:  │
