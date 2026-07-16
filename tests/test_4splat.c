@@ -311,6 +311,22 @@ static bool test_read_header_rejects_null_header(void) {
   return ok;
 }
 
+static bool test_read_header_fails_on_short_file(void) {
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+
+  Splat4DHeader header = make_header();
+  // Write slightly fewer bytes than required
+  fwrite(&header, sizeof(uint8_t), sizeof(Splat4DHeader) - 1, fp);
+  rewind(fp);
+
+  Splat4DHeader out;
+  bool failed = !read_splat4DHeader(fp, &out);
+  fclose(fp);
+  return failed;
+}
+
 static bool test_write_palette_rejects_nulls(void) {
   Splat4D palette_data[2];
   make_palette(palette_data);
@@ -573,6 +589,7 @@ static test_case TESTS[] = {
     {"write_header_rejects_null_header", test_write_header_rejects_null_header},
     {"read_header_rejects_null_fp", test_read_header_rejects_null_fp},
     {"read_header_rejects_null_header", test_read_header_rejects_null_header},
+    {"read_header_fails_on_short_file", test_read_header_fails_on_short_file},
     {"write_palette_rejects_nulls", test_write_palette_rejects_nulls},
     {"read_palette_rejects_invalid_inputs", test_read_palette_rejects_invalid_inputs},
     {"read_palette_fails_on_short_file", test_read_palette_fails_on_short_file},
