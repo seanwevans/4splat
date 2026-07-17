@@ -557,6 +557,44 @@ static bool test_read_video_fails_on_invalid_footer_marker(void) {
   return failed;
 }
 
+static bool test_header_total_indices_checked(void) {
+  uint64_t total = 0;
+  Splat4DHeader h = make_header();
+
+  // Happy path
+  if (!header_total_indices_checked(&h, &total) || total != 4)
+    return false;
+
+  // Null pointers
+  if (header_total_indices_checked(NULL, &total))
+    return false;
+  if (header_total_indices_checked(&h, NULL))
+    return false;
+
+  // Zero dimension
+  Splat4DHeader h_zero = h;
+  h_zero.width = 0;
+  if (header_total_indices_checked(&h_zero, &total))
+    return false;
+
+  h_zero = h;
+  h_zero.height = 0;
+  if (header_total_indices_checked(&h_zero, &total))
+    return false;
+
+  // Overflow dimensions
+  // 0xFFFFFFFF * 0xFFFFFFFF fits in uint64_t, but multiplying by 2 overflows it
+  Splat4DHeader h_overflow = h;
+  h_overflow.width = 0xFFFFFFFF;
+  h_overflow.height = 0xFFFFFFFF;
+  h_overflow.depth = 2;
+  h_overflow.frames = 1;
+  if (header_total_indices_checked(&h_overflow, &total))
+    return false;
+
+  return true;
+}
+
 static bool test_idxoffset_sanity_mismatch(void) {
   Splat4DHeader header = make_header();
   Splat4DFooter footer = create_splat4DFooter(&header);
@@ -566,6 +604,7 @@ static bool test_idxoffset_sanity_mismatch(void) {
 }
 
 static test_case TESTS[] = {
+    {"header_total_indices_checked", test_header_total_indices_checked},
     {"crc32_known_value", test_crc32_known_value},
     {"checksum_matches_footer", test_compute_video_checksum_matches_footer},
     {"idxoffset_helpers_agree", test_idxoffset_helpers_agree},
