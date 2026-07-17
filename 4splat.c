@@ -1627,181 +1627,182 @@ static int command_encode(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-static int execute_encode(EncodeOptions *opts) {
-  Splat4D *palette = NULL;
-  uint32_t palette_count = 0;
-  if (!load_palette_from_file(opts->palette_path, &palette, &palette_count))
-    return EXIT_FAILURE;
+  static int execute_encode(EncodeOptions * opts) {
+    Splat4D *palette = NULL;
+    uint32_t palette_count = 0;
+    if (!load_palette_from_file(opts->palette_path, &palette, &palette_count))
+      return EXIT_FAILURE;
 
-  if (!opts->meta.palette_size_set)
-    opts->meta.palette_size = palette_count;
+    if (!opts->meta.palette_size_set)
+      opts->meta.palette_size = palette_count;
 
-  if (meta.palette_size != palette_count) {
-    LOG_ERROR("❌ Palette size mismatch: option=%u file=%u\n", meta.palette_size, palette_count);
-    free(palette);
-    return EXIT_FAILURE;
-  }
+    if (meta.palette_size != palette_count) {
+      LOG_ERROR("❌ Palette size mismatch: option=%u file=%u\n", meta.palette_size, palette_count);
+      free(palette);
+      return EXIT_FAILURE;
+    }
 
-  uint64_t *indices = NULL;
-  uint64_t index_count = 0;
-  if (!load_index_from_file(opts->index_path, &indices, &index_count)) {
-    free(palette);
-    return EXIT_FAILURE;
-  }
+    uint64_t *indices = NULL;
+    uint64_t index_count = 0;
+    if (!load_index_from_file(opts->index_path, &indices, &index_count)) {
+      free(palette);
+      return EXIT_FAILURE;
+    }
 
-  uint64_t expected_indices = (uint64_t)opts->meta.width * (uint64_t)opts->meta.height *
-                              (uint64_t)opts->meta.depth * (uint64_t)opts->meta.frames;
-  if (expected_indices != index_count) {
-    LOG_ERROR("❌ Index count mismatch: expected %" PRIu64
-              " (from dimensions) but file has %" PRIu64 " entries\n",
-              expected_indices, index_count);
-    free(palette);
-    free(indices);
-    return EXIT_FAILURE;
-  }
+    uint64_t expected_indices = (uint64_t)opts->meta.width * (uint64_t)opts->meta.height *
+                                (uint64_t)opts->meta.depth * (uint64_t)opts->meta.frames;
+    if (expected_indices != index_count) {
+      LOG_ERROR("❌ Index count mismatch: expected %" PRIu64
+                " (from dimensions) but file has %" PRIu64 " entries\n",
+                expected_indices, index_count);
+      free(palette);
+      free(indices);
+      return EXIT_FAILURE;
+    }
 
-  Splat4DHeader header =
-      create_splat4DHeader(opts->meta.width, opts->meta.height, opts->meta.depth, opts->meta.frames,
-                           opts->meta.palette_size, opts->meta.flags_set ? opts->meta.flags : 0u);
-  Splat4DVideo video = create_splat4DVideo(header, palette, indices);
+    Splat4DHeader header = create_splat4DHeader(
+        opts->meta.width, opts->meta.height, opts->meta.depth, opts->meta.frames,
+        opts->meta.palette_size, opts->meta.flags_set ? opts->meta.flags : 0u);
+    Splat4DVideo video = create_splat4DVideo(header, palette, indices);
 
-  FILE *fp = fopen(opts->output_path, "wb");
-  if (!fp) {
-    LOG_ERROR("❌ Unable to create '%s': %s\n", output_path, strerror(errno));
+    FILE *fp = fopen(opts->output_path, "wb");
+    if (!fp) {
+      LOG_ERROR("❌ Unable to create '%s': %s\n", output_path, strerror(errno));
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
+
+    bool wrote = write_splat4DVideo(fp, &video);
+    fclose(fp);
     free_splat4DVideo(&video);
-    return EXIT_FAILURE;
+
+    if (!wrote) {
+      LOG_ERROR("❌ Failed to write 4Splat file '%s'\n", output_path);
+      return EXIT_FAILURE;
+    }
+
+    printf("✅ Wrote 4Splat file to '%s'\n", opts->output_path);
+    return EXIT_SUCCESS;
   }
 
-  bool wrote = write_splat4DVideo(fp, &video);
-  fclose(fp);
-  free_splat4DVideo(&video);
+  static int command_encode(int argc, char **argv) {
+    EncodeOptions opts = {0};
 
-  if (!wrote) {
-    LOG_ERROR("❌ Failed to write 4Splat file '%s'\n", output_path);
-    return EXIT_FAILURE;
-  }
-
-  printf("✅ Wrote 4Splat file to '%s'\n", opts->output_path);
-  return EXIT_SUCCESS;
-}
-
-static int command_encode(int argc, char **argv) {
-  EncodeOptions opts = {0};
-
-  for (int i = 0; i < argc; i++) {
-    const char *arg = argv[i];
-    if (strcmp(arg, "--palette") == 0 && i + 1 < argc) {
-      opts.palette_path = argv[++i];
-    } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
-      opts.index_path = argv[++i];
-    } else if (strcmp(arg, "--output") == 0 && i + 1 < argc) {
-      opts.output_path = argv[++i];
-    } else if ((strcmp(arg, "--width") == 0 || strcmp(arg, "--height") == 0 ||
-                strcmp(arg, "--depth") == 0 || strcmp(arg, "--frames") == 0 ||
-                strcmp(arg, "--palette-size") == 0 || strcmp(arg, "--flags") == 0) &&
-               i + 1 < argc) {
-      if (!parse_metadata_option(arg, argv[++i], &opts.meta)) {
-        fprintf(stderr, "❌ Invalid value for %s\n", arg);
+    for (int i = 0; i < argc; i++) {
+      const char *arg = argv[i];
+      if (strcmp(arg, "--palette") == 0 && i + 1 < argc) {
+        opts.palette_path = argv[++i];
+      } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
+        opts.index_path = argv[++i];
+      } else if (strcmp(arg, "--output") == 0 && i + 1 < argc) {
+        opts.output_path = argv[++i];
+      } else if ((strcmp(arg, "--width") == 0 || strcmp(arg, "--height") == 0 ||
+                  strcmp(arg, "--depth") == 0 || strcmp(arg, "--frames") == 0 ||
+                  strcmp(arg, "--palette-size") == 0 || strcmp(arg, "--flags") == 0) &&
+                 i + 1 < argc) {
+        if (!parse_metadata_option(arg, argv[++i], &opts.meta)) {
+          fprintf(stderr, "❌ Invalid value for %s\n", arg);
+          return EXIT_FAILURE;
+        }
+      } else {
+        fprintf(stderr, "❌ Unknown or incomplete option '%s'\n", arg);
         return EXIT_FAILURE;
       }
-    } else {
-      fprintf(stderr, "❌ Unknown or incomplete option '%s'\n", arg);
+    }
+
+    if (!opts.palette_path || !opts.index_path || !opts.output_path || !opts.meta.width_set ||
+        !opts.meta.height_set || !opts.meta.depth_set || !opts.meta.frames_set) {
+      fprintf(stderr,
+              "❌ encode requires --palette, --index, --output, --width, --height, --depth, "
+              "and --frames\n");
       return EXIT_FAILURE;
     }
+
+    return execute_encode(&opts);
   }
 
-  if (!opts.palette_path || !opts.index_path || !opts.output_path || !opts.meta.width_set ||
-      !opts.meta.height_set || !opts.meta.depth_set || !opts.meta.frames_set) {
-    fprintf(stderr, "❌ encode requires --palette, --index, --output, --width, --height, --depth, "
-                    "and --frames\n");
-    return EXIT_FAILURE;
-  }
+  static int command_decode(int argc, char **argv) {
+    const char *input_path = NULL;
+    const char *palette_out = NULL;
+    const char *index_out = NULL;
+    bool print_summary = false;
+    bool do_validate = false;
 
-  return execute_encode(&opts);
-}
+    for (int i = 0; i < argc; i++) {
+      const char *arg = argv[i];
+      if (strcmp(arg, "--input") == 0 && i + 1 < argc) {
+        input_path = argv[++i];
+      } else if (strcmp(arg, "--palette") == 0 && i + 1 < argc) {
+        palette_out = argv[++i];
+      } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
+        index_out = argv[++i];
+      } else if (strcmp(arg, "--print") == 0) {
+        print_summary = true;
+      } else if (strcmp(arg, "--validate") == 0) {
+        do_validate = true;
+      } else {
+        LOG_ERROR("❌ Unknown or incomplete option '%s'\n", arg);
+        return EXIT_FAILURE;
+      }
+    }
 
-static int command_decode(int argc, char **argv) {
-  const char *input_path = NULL;
-  const char *palette_out = NULL;
-  const char *index_out = NULL;
-  bool print_summary = false;
-  bool do_validate = false;
-
-  for (int i = 0; i < argc; i++) {
-    const char *arg = argv[i];
-    if (strcmp(arg, "--input") == 0 && i + 1 < argc) {
-      input_path = argv[++i];
-    } else if (strcmp(arg, "--palette") == 0 && i + 1 < argc) {
-      palette_out = argv[++i];
-    } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
-      index_out = argv[++i];
-    } else if (strcmp(arg, "--print") == 0) {
-      print_summary = true;
-    } else if (strcmp(arg, "--validate") == 0) {
-      do_validate = true;
-    } else {
-      LOG_ERROR("❌ Unknown or incomplete option '%s'\n", arg);
+    if (!input_path) {
+      LOG_ERROR("❌ decode requires --input <file.4spl>\n");
       return EXIT_FAILURE;
     }
-  }
 
-  if (!input_path) {
-    LOG_ERROR("❌ decode requires --input <file.4spl>\n");
-    return EXIT_FAILURE;
-  }
+    FILE *fp = fopen(input_path, "rb");
+    if (!fp) {
+      LOG_ERROR("❌ Unable to open '%s': %s\n", input_path, strerror(errno));
+      return EXIT_FAILURE;
+    }
 
-  FILE *fp = fopen(input_path, "rb");
-  if (!fp) {
-    LOG_ERROR("❌ Unable to open '%s': %s\n", input_path, strerror(errno));
-    return EXIT_FAILURE;
-  }
+    Splat4DVideo video;
+    bool read_ok = read_splat4DVideo(fp, &video);
+    fclose(fp);
 
-  Splat4DVideo video;
-  bool read_ok = read_splat4DVideo(fp, &video);
-  fclose(fp);
+    if (!read_ok) {
+      LOG_ERROR("❌ Failed to read '%s'\n", input_path);
+      return EXIT_FAILURE;
+    }
 
-  if (!read_ok) {
-    LOG_ERROR("❌ Failed to read '%s'\n", input_path);
-    return EXIT_FAILURE;
-  }
+    if (do_validate && !validate_splat4DVideo(&video)) {
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
 
-  if (do_validate && !validate_splat4DVideo(&video)) {
+    if (print_summary)
+      print_splat4DVideo(&video);
+
+    if (palette_out && !save_palette_to_file(palette_out, &video)) {
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
+
+    if (index_out && !save_index_to_file(index_out, &video)) {
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
+
     free_splat4DVideo(&video);
-    return EXIT_FAILURE;
+    return EXIT_SUCCESS;
   }
 
-  if (print_summary)
-    print_splat4DVideo(&video);
+  int main(int argc, char **argv) {
+    if (argc < 2) {
+      print_usage(stderr);
+      return EXIT_FAILURE;
+    }
 
-  if (palette_out && !save_palette_to_file(palette_out, &video)) {
-    free_splat4DVideo(&video);
-    return EXIT_FAILURE;
-  }
+    const char *command = argv[1];
+    if (strcmp(command, "encode") == 0) {
+      return command_encode(argc - 2, argv + 2);
+    }
+    if (strcmp(command, "decode") == 0) {
+      return command_decode(argc - 2, argv + 2);
+    }
 
-  if (index_out && !save_index_to_file(index_out, &video)) {
-    free_splat4DVideo(&video);
-    return EXIT_FAILURE;
-  }
-
-  free_splat4DVideo(&video);
-  return EXIT_SUCCESS;
-}
-
-int main(int argc, char **argv) {
-  if (argc < 2) {
     print_usage(stderr);
     return EXIT_FAILURE;
   }
-
-  const char *command = argv[1];
-  if (strcmp(command, "encode") == 0) {
-    return command_encode(argc - 2, argv + 2);
-  }
-  if (strcmp(command, "decode") == 0) {
-    return command_decode(argc - 2, argv + 2);
-  }
-
-  print_usage(stderr);
-  return EXIT_FAILURE;
-}
 #endif // UNIT_TEST
