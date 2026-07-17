@@ -619,6 +619,74 @@ static bool test_idxoffset_sanity_mismatch(void) {
          !check_idxoffset_file(NULL, &header, &footer);
 }
 
+typedef struct {
+  size_t total_bytes;
+  size_t call_count;
+} MockStreamCtx;
+
+static bool mock_stream_consumer(const uint8_t *chunk, size_t n, void *ctx) {
+  (void)chunk;
+  MockStreamCtx *state = ctx;
+  state->total_bytes += n;
+  state->call_count++;
+  return true;
+}
+
+static bool mock_stream_consumer_fail(const uint8_t *chunk, size_t n, void *ctx) {
+  (void)chunk;
+  (void)n;
+  MockStreamCtx *state = ctx;
+  state->call_count++;
+  return false;
+}
+
+static bool test_stream_splat4DVideo_success(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+
+  MockStreamCtx ctx = {0};
+  // Use a chunk size that will trigger multiple calls.
+  bool ok = stream_splat4DVideo(&video, 16, mock_stream_consumer, &ctx);
+
+  size_t expected_bytes =
+      sizeof(Splat4DHeader) + video.header.pSize * sizeof(Splat4D) +
+      header_total_indices(&video.header) * 1; // get_index_width_bytes returns 1
+
+  return ok && ctx.total_bytes == expected_bytes && ctx.call_count > 1;
+}
+
+static bool test_stream_splat4DVideo_rejects_null(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+  MockStreamCtx ctx = {0};
+
+  bool fail_video = !stream_splat4DVideo(NULL, 1024, mock_stream_consumer, &ctx);
+  bool fail_func = !stream_splat4DVideo(&video, 1024, NULL, &ctx);
+
+  return fail_video && fail_func && ctx.call_count == 0;
+}
+
+static bool test_stream_splat4DVideo_stops_on_consumer_error(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+
+  MockStreamCtx ctx = {0};
+  bool ok = stream_splat4DVideo(&video, 16, mock_stream_consumer_fail, &ctx);
+
+  // Should fail and call_count should be exactly 1, since the first call returns false and stops
+  // streaming
+  return !ok && ctx.call_count == 1;
+}
+
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
@@ -663,6 +731,10 @@ static test_case TESTS[] = {
     {"read_video_fails_on_invalid_footer_marker", test_read_video_fails_on_invalid_footer_marker},
     {"idxoffset_sanity_mismatch", test_idxoffset_sanity_mismatch},
     {"header_defaults_to_float32_precision", test_header_defaults_to_float32_precision},
+    {"stream_splat4DVideo_success", test_stream_splat4DVideo_success},
+    {"stream_splat4DVideo_rejects_null", test_stream_splat4DVideo_rejects_null},
+    {"stream_splat4DVideo_stops_on_consumer_error",
+     test_stream_splat4DVideo_stops_on_consumer_error},
 };
 
 int main(void) {
