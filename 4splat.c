@@ -338,12 +338,6 @@ splat4d_flags_make(SplatEndian endian, SplatSortOrder sort_order, SplatPrecision
   return flags;
 }
 
-static inline Splat4DFlags splat4d_flags_default(void) {
-  return splat4d_flags_make(SPLAT_ENDIAN_LITTLE, SPLAT_SORT_UNSORTED, SPLAT_PRECISION_FLOAT32,
-                            SPLAT_COMPRESSION_NONE, SPLAT_INDEX_WIDTH_32, SPLAT_SHAPE_ISOTROPIC,
-                            SPLAT_COLOR_SRGB, SPLAT_INTERP_NONE);
-}
-
 static const char *splat_endian_name(SplatEndian e) {
   switch (e) {
   case SPLAT_ENDIAN_LITTLE:
