@@ -338,12 +338,6 @@ splat4d_flags_make(SplatEndian endian, SplatSortOrder sort_order, SplatPrecision
   return flags;
 }
 
-static inline Splat4DFlags splat4d_flags_default(void) {
-  return splat4d_flags_make(SPLAT_ENDIAN_LITTLE, SPLAT_SORT_UNSORTED, SPLAT_PRECISION_FLOAT32,
-                            SPLAT_COMPRESSION_NONE, SPLAT_INDEX_WIDTH_32, SPLAT_SHAPE_ISOTROPIC,
-                            SPLAT_COLOR_SRGB, SPLAT_INTERP_NONE);
-}
-
 static const char *splat_endian_name(SplatEndian e) {
   switch (e) {
   case SPLAT_ENDIAN_LITTLE:
@@ -951,8 +945,13 @@ static void print_flag_line(FILE *out, const char *label, const char *value) {
   fputs("│", out);
   fputs(buffer, out);
   if (len < width) {
-    for (size_t i = len; i < width; ++i)
-      fputc(' ', out);
+    static const char spaces[] = "                           "; // 27 spaces
+    size_t pad = width - len;
+    if (pad <= 27)
+      fputs(spaces + 27 - pad, out);
+    else
+      for (size_t i = len; i < width; ++i)
+        fputc(' ', out);
   }
   fputs(" │\n", out);
 }
@@ -1589,51 +1588,24 @@ static bool parse_metadata_option(const char *name, const char *value, MetadataO
   return true;
 }
 
-static int command_encode(int argc, char **argv) {
-  const char *palette_path = NULL;
-  const char *index_path = NULL;
-  const char *output_path = NULL;
-  MetadataOptions meta = {0};
+typedef struct {
+  const char *palette_path;
+  const char *index_path;
+  const char *output_path;
+  MetadataOptions meta;
+} EncodeOptions;
 
-  for (int i = 0; i < argc; i++) {
-    const char *arg = argv[i];
-    if (strcmp(arg, "--palette") == 0 && i + 1 < argc) {
-      palette_path = argv[++i];
-    } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
-      index_path = argv[++i];
-    } else if (strcmp(arg, "--output") == 0 && i + 1 < argc) {
-      output_path = argv[++i];
-    } else if ((strcmp(arg, "--width") == 0 || strcmp(arg, "--height") == 0 ||
-                strcmp(arg, "--depth") == 0 || strcmp(arg, "--frames") == 0 ||
-                strcmp(arg, "--palette-size") == 0 || strcmp(arg, "--flags") == 0) &&
-               i + 1 < argc) {
-      if (!parse_metadata_option(arg, argv[++i], &meta)) {
-        fprintf(stderr, "❌ Invalid value for %s\n", arg);
-        return EXIT_FAILURE;
-      }
-    } else {
-      fprintf(stderr, "❌ Unknown or incomplete option '%s'\n", arg);
-      return EXIT_FAILURE;
-    }
-  }
-
-  if (!palette_path || !index_path || !output_path || !meta.width_set || !meta.height_set ||
-      !meta.depth_set || !meta.frames_set) {
-    fprintf(stderr, "❌ encode requires --palette, --index, --output, --width, --height, --depth, "
-                    "and --frames\n");
-    return EXIT_FAILURE;
-  }
-
+static int execute_encode(EncodeOptions *opts) {
   Splat4D *palette = NULL;
   uint32_t palette_count = 0;
-  if (!load_palette_from_file(palette_path, &palette, &palette_count))
+  if (!load_palette_from_file(opts->palette_path, &palette, &palette_count))
     return EXIT_FAILURE;
 
-  if (!meta.palette_size_set)
-    meta.palette_size = palette_count;
+  if (!opts->meta.palette_size_set)
+    opts->meta.palette_size = palette_count;
 
-  if (meta.palette_size != palette_count) {
-    fprintf(stderr, "❌ Palette size mismatch: option=%u file=%u\n", meta.palette_size,
+  if (opts->meta.palette_size != palette_count) {
+    fprintf(stderr, "❌ Palette size mismatch: option=%u file=%u\n", opts->meta.palette_size,
             palette_count);
     free(palette);
     return EXIT_FAILURE;
@@ -1641,13 +1613,13 @@ static int command_encode(int argc, char **argv) {
 
   uint64_t *indices = NULL;
   uint64_t index_count = 0;
-  if (!load_index_from_file(index_path, &indices, &index_count)) {
+  if (!load_index_from_file(opts->index_path, &indices, &index_count)) {
     free(palette);
     return EXIT_FAILURE;
   }
 
-  uint64_t expected_indices =
-      (uint64_t)meta.width * (uint64_t)meta.height * (uint64_t)meta.depth * (uint64_t)meta.frames;
+  uint64_t expected_indices = (uint64_t)opts->meta.width * (uint64_t)opts->meta.height *
+                              (uint64_t)opts->meta.depth * (uint64_t)opts->meta.frames;
   if (expected_indices != index_count) {
     fprintf(stderr,
             "❌ Index count mismatch: expected %" PRIu64 " (from dimensions) but file has %" PRIu64
@@ -1658,13 +1630,14 @@ static int command_encode(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  Splat4DHeader header = create_splat4DHeader(meta.width, meta.height, meta.depth, meta.frames,
-                                              meta.palette_size, meta.flags_set ? meta.flags : 0u);
+  Splat4DHeader header =
+      create_splat4DHeader(opts->meta.width, opts->meta.height, opts->meta.depth, opts->meta.frames,
+                           opts->meta.palette_size, opts->meta.flags_set ? opts->meta.flags : 0u);
   Splat4DVideo video = create_splat4DVideo(header, palette, indices);
 
-  FILE *fp = fopen(output_path, "wb");
+  FILE *fp = fopen(opts->output_path, "wb");
   if (!fp) {
-    fprintf(stderr, "❌ Unable to create '%s': %s\n", output_path, strerror(errno));
+    fprintf(stderr, "❌ Unable to create '%s': %s\n", opts->output_path, strerror(errno));
     free_splat4DVideo(&video);
     return EXIT_FAILURE;
   }
@@ -1674,12 +1647,47 @@ static int command_encode(int argc, char **argv) {
   free_splat4DVideo(&video);
 
   if (!wrote) {
-    fprintf(stderr, "❌ Failed to write 4Splat file '%s'\n", output_path);
+    fprintf(stderr, "❌ Failed to write 4Splat file '%s'\n", opts->output_path);
     return EXIT_FAILURE;
   }
 
-  printf("✅ Wrote 4Splat file to '%s'\n", output_path);
+  printf("✅ Wrote 4Splat file to '%s'\n", opts->output_path);
   return EXIT_SUCCESS;
+}
+
+static int command_encode(int argc, char **argv) {
+  EncodeOptions opts = {0};
+
+  for (int i = 0; i < argc; i++) {
+    const char *arg = argv[i];
+    if (strcmp(arg, "--palette") == 0 && i + 1 < argc) {
+      opts.palette_path = argv[++i];
+    } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
+      opts.index_path = argv[++i];
+    } else if (strcmp(arg, "--output") == 0 && i + 1 < argc) {
+      opts.output_path = argv[++i];
+    } else if ((strcmp(arg, "--width") == 0 || strcmp(arg, "--height") == 0 ||
+                strcmp(arg, "--depth") == 0 || strcmp(arg, "--frames") == 0 ||
+                strcmp(arg, "--palette-size") == 0 || strcmp(arg, "--flags") == 0) &&
+               i + 1 < argc) {
+      if (!parse_metadata_option(arg, argv[++i], &opts.meta)) {
+        fprintf(stderr, "❌ Invalid value for %s\n", arg);
+        return EXIT_FAILURE;
+      }
+    } else {
+      fprintf(stderr, "❌ Unknown or incomplete option '%s'\n", arg);
+      return EXIT_FAILURE;
+    }
+  }
+
+  if (!opts.palette_path || !opts.index_path || !opts.output_path || !opts.meta.width_set ||
+      !opts.meta.height_set || !opts.meta.depth_set || !opts.meta.frames_set) {
+    fprintf(stderr, "❌ encode requires --palette, --index, --output, --width, --height, --depth, "
+                    "and --frames\n");
+    return EXIT_FAILURE;
+  }
+
+  return execute_encode(&opts);
 }
 
 static int command_decode(int argc, char **argv) {
