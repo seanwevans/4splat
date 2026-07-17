@@ -597,9 +597,9 @@ static bool test_stream_splat4DVideo_success(void) {
   // Use a chunk size that will trigger multiple calls.
   bool ok = stream_splat4DVideo(&video, 16, mock_stream_consumer, &ctx);
 
-  size_t expected_bytes = sizeof(Splat4DHeader) +
-                          video.header.pSize * sizeof(Splat4D) +
-                          header_total_indices(&video.header) * 1; // get_index_width_bytes returns 1
+  size_t expected_bytes =
+      sizeof(Splat4DHeader) + video.header.pSize * sizeof(Splat4D) +
+      header_total_indices(&video.header) * 1; // get_index_width_bytes returns 1
 
   return ok && ctx.total_bytes == expected_bytes && ctx.call_count > 1;
 }
@@ -628,7 +628,8 @@ static bool test_stream_splat4DVideo_stops_on_consumer_error(void) {
   MockStreamCtx ctx = {0};
   bool ok = stream_splat4DVideo(&video, 16, mock_stream_consumer_fail, &ctx);
 
-  // Should fail and call_count should be exactly 1, since the first call returns false and stops streaming
+  // Should fail and call_count should be exactly 1, since the first call returns false and stops
+  // streaming
   return !ok && ctx.call_count == 1;
 }
 
@@ -676,7 +677,8 @@ static test_case TESTS[] = {
     {"header_defaults_to_float32_precision", test_header_defaults_to_float32_precision},
     {"stream_splat4DVideo_success", test_stream_splat4DVideo_success},
     {"stream_splat4DVideo_rejects_null", test_stream_splat4DVideo_rejects_null},
-    {"stream_splat4DVideo_stops_on_consumer_error", test_stream_splat4DVideo_stops_on_consumer_error},
+    {"stream_splat4DVideo_stops_on_consumer_error",
+     test_stream_splat4DVideo_stops_on_consumer_error},
 };
 
 int main(void) {
