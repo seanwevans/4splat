@@ -945,8 +945,13 @@ static void print_flag_line(FILE *out, const char *label, const char *value) {
   fputs("│", out);
   fputs(buffer, out);
   if (len < width) {
-    for (size_t i = len; i < width; ++i)
-      fputc(' ', out);
+    static const char spaces[] = "                           "; // 27 spaces
+    size_t pad = width - len;
+    if (pad <= 27)
+      fputs(spaces + 27 - pad, out);
+    else
+      for (size_t i = len; i < width; ++i)
+        fputc(' ', out);
   }
   fputs(" │\n", out);
 }
