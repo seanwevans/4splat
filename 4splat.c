@@ -341,12 +341,6 @@ splat4d_flags_make(SplatEndian endian, SplatSortOrder sort_order, SplatPrecision
   return flags;
 }
 
-static inline Splat4DFlags splat4d_flags_default(void) {
-  return splat4d_flags_make(SPLAT_ENDIAN_LITTLE, SPLAT_SORT_UNSORTED, SPLAT_PRECISION_FLOAT32,
-                            SPLAT_COMPRESSION_NONE, SPLAT_INDEX_WIDTH_32, SPLAT_SHAPE_ISOTROPIC,
-                            SPLAT_COLOR_SRGB, SPLAT_INTERP_NONE);
-}
-
 static const char *splat_endian_name(SplatEndian e) {
   switch (e) {
   case SPLAT_ENDIAN_LITTLE:
@@ -734,18 +728,19 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
         if (to_pack > items_per_chunk)
           to_pack = items_per_chunk;
 
+        const uint64_t *src = v->index.index + items_streamed;
         if (idx_width == 1) {
           uint8_t *p = (uint8_t *)pack_buf;
           for (uint64_t i = 0; i < to_pack; i++)
-            p[i] = (uint8_t)v->index.index[items_streamed + i];
+            p[i] = (uint8_t)src[i];
         } else if (idx_width == 2) {
           uint16_t *p = (uint16_t *)pack_buf;
           for (uint64_t i = 0; i < to_pack; i++)
-            p[i] = (uint16_t)v->index.index[items_streamed + i];
+            p[i] = (uint16_t)src[i];
         } else if (idx_width == 4) {
           uint32_t *p = (uint32_t *)pack_buf;
           for (uint64_t i = 0; i < to_pack; i++)
-            p[i] = (uint32_t)v->index.index[items_streamed + i];
+            p[i] = (uint32_t)src[i];
         }
 
         if (idx_width > 0 && to_pack > SIZE_MAX / idx_width)
@@ -954,8 +949,13 @@ static void print_flag_line(FILE *out, const char *label, const char *value) {
   fputs("│", out);
   fputs(buffer, out);
   if (len < width) {
-    for (size_t i = len; i < width; ++i)
-      fputc(' ', out);
+    static const char spaces[] = "                           "; // 27 spaces
+    size_t pad = width - len;
+    if (pad <= 27)
+      fputs(spaces + 27 - pad, out);
+    else
+      for (size_t i = len; i < width; ++i)
+        fputc(' ', out);
   }
   fputs(" │\n", out);
 }
@@ -1099,18 +1099,19 @@ bool write_splat4DIndex(FILE *fp, const Splat4DIndex *i, uint64_t total, uint32_
       if (to_pack > items_per_chunk)
         to_pack = items_per_chunk;
 
+      const uint64_t *src = i->index + items_written;
       if (idx_width == 1) {
         uint8_t *p = (uint8_t *)pack_buf;
         for (uint64_t k = 0; k < to_pack; k++)
-          p[k] = (uint8_t)i->index[items_written + k];
+          p[k] = (uint8_t)src[k];
       } else if (idx_width == 2) {
         uint16_t *p = (uint16_t *)pack_buf;
         for (uint64_t k = 0; k < to_pack; k++)
-          p[k] = (uint16_t)i->index[items_written + k];
+          p[k] = (uint16_t)src[k];
       } else if (idx_width == 4) {
         uint32_t *p = (uint32_t *)pack_buf;
         for (uint64_t k = 0; k < to_pack; k++)
-          p[k] = (uint32_t)i->index[items_written + k];
+          p[k] = (uint32_t)src[k];
       }
 
       if (fwrite(pack_buf, idx_width, (size_t)to_pack, fp) != (size_t)to_pack)
@@ -1156,18 +1157,19 @@ bool read_splat4DIndex(FILE *fp, Splat4DIndex *i, uint64_t total, uint32_t flags
         return false;
       }
 
+      uint64_t *dst = i->index + items_read;
       if (idx_width == 1) {
         uint8_t *p = (uint8_t *)pack_buf;
         for (uint64_t k = 0; k < to_read; k++)
-          i->index[items_read + k] = p[k];
+          dst[k] = p[k];
       } else if (idx_width == 2) {
         uint16_t *p = (uint16_t *)pack_buf;
         for (uint64_t k = 0; k < to_read; k++)
-          i->index[items_read + k] = p[k];
+          dst[k] = p[k];
       } else if (idx_width == 4) {
         uint32_t *p = (uint32_t *)pack_buf;
         for (uint64_t k = 0; k < to_read; k++)
-          i->index[items_read + k] = p[k];
+          dst[k] = p[k];
       }
       items_read += to_read;
     }
@@ -1625,13 +1627,14 @@ static int command_encode(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
+static int execute_encode(EncodeOptions *opts) {
   Splat4D *palette = NULL;
   uint32_t palette_count = 0;
-  if (!load_palette_from_file(palette_path, &palette, &palette_count))
+  if (!load_palette_from_file(opts->palette_path, &palette, &palette_count))
     return EXIT_FAILURE;
 
-  if (!meta.palette_size_set)
-    meta.palette_size = palette_count;
+  if (!opts->meta.palette_size_set)
+    opts->meta.palette_size = palette_count;
 
   if (meta.palette_size != palette_count) {
     LOG_ERROR("❌ Palette size mismatch: option=%u file=%u\n", meta.palette_size, palette_count);
@@ -1641,13 +1644,13 @@ static int command_encode(int argc, char **argv) {
 
   uint64_t *indices = NULL;
   uint64_t index_count = 0;
-  if (!load_index_from_file(index_path, &indices, &index_count)) {
+  if (!load_index_from_file(opts->index_path, &indices, &index_count)) {
     free(palette);
     return EXIT_FAILURE;
   }
 
-  uint64_t expected_indices =
-      (uint64_t)meta.width * (uint64_t)meta.height * (uint64_t)meta.depth * (uint64_t)meta.frames;
+  uint64_t expected_indices = (uint64_t)opts->meta.width * (uint64_t)opts->meta.height *
+                              (uint64_t)opts->meta.depth * (uint64_t)opts->meta.frames;
   if (expected_indices != index_count) {
     LOG_ERROR("❌ Index count mismatch: expected %" PRIu64
               " (from dimensions) but file has %" PRIu64 " entries\n",
@@ -1657,11 +1660,12 @@ static int command_encode(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  Splat4DHeader header = create_splat4DHeader(meta.width, meta.height, meta.depth, meta.frames,
-                                              meta.palette_size, meta.flags_set ? meta.flags : 0u);
+  Splat4DHeader header =
+      create_splat4DHeader(opts->meta.width, opts->meta.height, opts->meta.depth, opts->meta.frames,
+                           opts->meta.palette_size, opts->meta.flags_set ? opts->meta.flags : 0u);
   Splat4DVideo video = create_splat4DVideo(header, palette, indices);
 
-  FILE *fp = fopen(output_path, "wb");
+  FILE *fp = fopen(opts->output_path, "wb");
   if (!fp) {
     LOG_ERROR("❌ Unable to create '%s': %s\n", output_path, strerror(errno));
     free_splat4DVideo(&video);
@@ -1677,8 +1681,43 @@ static int command_encode(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  printf("✅ Wrote 4Splat file to '%s'\n", output_path);
+  printf("✅ Wrote 4Splat file to '%s'\n", opts->output_path);
   return EXIT_SUCCESS;
+}
+
+static int command_encode(int argc, char **argv) {
+  EncodeOptions opts = {0};
+
+  for (int i = 0; i < argc; i++) {
+    const char *arg = argv[i];
+    if (strcmp(arg, "--palette") == 0 && i + 1 < argc) {
+      opts.palette_path = argv[++i];
+    } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
+      opts.index_path = argv[++i];
+    } else if (strcmp(arg, "--output") == 0 && i + 1 < argc) {
+      opts.output_path = argv[++i];
+    } else if ((strcmp(arg, "--width") == 0 || strcmp(arg, "--height") == 0 ||
+                strcmp(arg, "--depth") == 0 || strcmp(arg, "--frames") == 0 ||
+                strcmp(arg, "--palette-size") == 0 || strcmp(arg, "--flags") == 0) &&
+               i + 1 < argc) {
+      if (!parse_metadata_option(arg, argv[++i], &opts.meta)) {
+        fprintf(stderr, "❌ Invalid value for %s\n", arg);
+        return EXIT_FAILURE;
+      }
+    } else {
+      fprintf(stderr, "❌ Unknown or incomplete option '%s'\n", arg);
+      return EXIT_FAILURE;
+    }
+  }
+
+  if (!opts.palette_path || !opts.index_path || !opts.output_path || !opts.meta.width_set ||
+      !opts.meta.height_set || !opts.meta.depth_set || !opts.meta.frames_set) {
+    fprintf(stderr, "❌ encode requires --palette, --index, --output, --width, --height, --depth, "
+                    "and --frames\n");
+    return EXIT_FAILURE;
+  }
+
+  return execute_encode(&opts);
 }
 
 static int command_decode(int argc, char **argv) {

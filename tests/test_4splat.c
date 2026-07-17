@@ -33,6 +33,22 @@ static void make_indices(uint64_t indices[4]) {
   indices[3] = 1;
 }
 
+static bool test_create_splat4D(void) {
+  float mu_x = 1.0f, sigma_x = 0.1f;
+  float mu_y = 2.0f, sigma_y = 0.2f;
+  float mu_z = 3.0f, sigma_z = 0.3f;
+  float mu_t = 4.0f, sigma_t = 0.4f;
+  float r = 0.5f, g = 0.6f, b = 0.7f, alpha = 0.8f;
+
+  Splat4D splat =
+      create_splat4D(mu_x, sigma_x, mu_y, sigma_y, mu_z, sigma_z, mu_t, sigma_t, r, g, b, alpha);
+
+  return splat.mu_x == mu_x && splat.sigma_x == sigma_x && splat.mu_y == mu_y &&
+         splat.sigma_y == sigma_y && splat.mu_z == mu_z && splat.sigma_z == sigma_z &&
+         splat.mu_t == mu_t && splat.sigma_t == sigma_t && splat.r == r && splat.g == g &&
+         splat.b == b && splat.alpha == alpha;
+}
+
 static bool test_crc32_known_value(void) {
   const char *input = "123456789";
   uint32_t actual = crc32(input, strlen(input));
@@ -557,6 +573,44 @@ static bool test_read_video_fails_on_invalid_footer_marker(void) {
   return failed;
 }
 
+static bool test_header_total_indices_checked(void) {
+  uint64_t total = 0;
+  Splat4DHeader h = make_header();
+
+  // Happy path
+  if (!header_total_indices_checked(&h, &total) || total != 4)
+    return false;
+
+  // Null pointers
+  if (header_total_indices_checked(NULL, &total))
+    return false;
+  if (header_total_indices_checked(&h, NULL))
+    return false;
+
+  // Zero dimension
+  Splat4DHeader h_zero = h;
+  h_zero.width = 0;
+  if (header_total_indices_checked(&h_zero, &total))
+    return false;
+
+  h_zero = h;
+  h_zero.height = 0;
+  if (header_total_indices_checked(&h_zero, &total))
+    return false;
+
+  // Overflow dimensions
+  // 0xFFFFFFFF * 0xFFFFFFFF fits in uint64_t, but multiplying by 2 overflows it
+  Splat4DHeader h_overflow = h;
+  h_overflow.width = 0xFFFFFFFF;
+  h_overflow.height = 0xFFFFFFFF;
+  h_overflow.depth = 2;
+  h_overflow.frames = 1;
+  if (header_total_indices_checked(&h_overflow, &total))
+    return false;
+
+  return true;
+}
+
 static bool test_idxoffset_sanity_mismatch(void) {
   Splat4DHeader header = make_header();
   Splat4DFooter footer = create_splat4DFooter(&header);
@@ -565,7 +619,77 @@ static bool test_idxoffset_sanity_mismatch(void) {
          !check_idxoffset_file(NULL, &header, &footer);
 }
 
+typedef struct {
+  size_t total_bytes;
+  size_t call_count;
+} MockStreamCtx;
+
+static bool mock_stream_consumer(const uint8_t *chunk, size_t n, void *ctx) {
+  (void)chunk;
+  MockStreamCtx *state = ctx;
+  state->total_bytes += n;
+  state->call_count++;
+  return true;
+}
+
+static bool mock_stream_consumer_fail(const uint8_t *chunk, size_t n, void *ctx) {
+  (void)chunk;
+  (void)n;
+  MockStreamCtx *state = ctx;
+  state->call_count++;
+  return false;
+}
+
+static bool test_stream_splat4DVideo_success(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+
+  MockStreamCtx ctx = {0};
+  // Use a chunk size that will trigger multiple calls.
+  bool ok = stream_splat4DVideo(&video, 16, mock_stream_consumer, &ctx);
+
+  size_t expected_bytes =
+      sizeof(Splat4DHeader) + video.header.pSize * sizeof(Splat4D) +
+      header_total_indices(&video.header) * 1; // get_index_width_bytes returns 1
+
+  return ok && ctx.total_bytes == expected_bytes && ctx.call_count > 1;
+}
+
+static bool test_stream_splat4DVideo_rejects_null(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+  MockStreamCtx ctx = {0};
+
+  bool fail_video = !stream_splat4DVideo(NULL, 1024, mock_stream_consumer, &ctx);
+  bool fail_func = !stream_splat4DVideo(&video, 1024, NULL, &ctx);
+
+  return fail_video && fail_func && ctx.call_count == 0;
+}
+
+static bool test_stream_splat4DVideo_stops_on_consumer_error(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+
+  MockStreamCtx ctx = {0};
+  bool ok = stream_splat4DVideo(&video, 16, mock_stream_consumer_fail, &ctx);
+
+  // Should fail and call_count should be exactly 1, since the first call returns false and stops
+  // streaming
+  return !ok && ctx.call_count == 1;
+}
+
 static test_case TESTS[] = {
+    {"header_total_indices_checked", test_header_total_indices_checked},
+    {"create_splat4D", test_create_splat4D},
     {"crc32_known_value", test_crc32_known_value},
     {"checksum_matches_footer", test_compute_video_checksum_matches_footer},
     {"idxoffset_helpers_agree", test_idxoffset_helpers_agree},
@@ -607,6 +731,10 @@ static test_case TESTS[] = {
     {"read_video_fails_on_invalid_footer_marker", test_read_video_fails_on_invalid_footer_marker},
     {"idxoffset_sanity_mismatch", test_idxoffset_sanity_mismatch},
     {"header_defaults_to_float32_precision", test_header_defaults_to_float32_precision},
+    {"stream_splat4DVideo_success", test_stream_splat4DVideo_success},
+    {"stream_splat4DVideo_rejects_null", test_stream_splat4DVideo_rejects_null},
+    {"stream_splat4DVideo_stops_on_consumer_error",
+     test_stream_splat4DVideo_stops_on_consumer_error},
 };
 
 int main(void) {
