@@ -166,6 +166,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define LOG_ERROR(...) fprintf(stderr, __VA_ARGS__)
+#define SAFE_SNPRINTF(...) snprintf(__VA_ARGS__)
+
 enum {
   SPLAT_FLAG_ENDIAN_BIG = 1u << 0,
   SPLAT_FLAG_PRECISION_SHIFT = 2,
@@ -189,18 +192,18 @@ static uint32_t sanitize_flags(uint32_t flags) {
 
 static bool flags_supported(uint32_t flags) {
   if (flags & ~SPLAT_FLAG_SUPPORTED_MASK) {
-    fprintf(stderr, "❌ Unsupported flag combination (0x%08X)\n", flags);
+    LOG_ERROR("❌ Unsupported flag combination (0x%08X)\n", flags);
     return false;
   }
 
   if (flags & SPLAT_FLAG_ENDIAN_BIG) {
-    fprintf(stderr, "❌ Big-endian 4Splat files are unsupported\n");
+    LOG_ERROR("❌ Big-endian 4Splat files are unsupported\n");
     return false;
   }
 
   uint32_t precision = flags & SPLAT_FLAG_PRECISION_MASK;
   if (precision != SPLAT_FLAG_PRECISION_FLOAT32) {
-    fprintf(stderr, "❌ Unsupported precision flag (0x%08X)\n", precision);
+    LOG_ERROR("❌ Unsupported precision flag (0x%08X)\n", precision);
     return false;
   }
 
@@ -941,7 +944,7 @@ static void print_flag_line(FILE *out, const char *label, const char *value) {
     return;
 
   char buffer[128];
-  int written = snprintf(buffer, sizeof buffer, "  %-12s %s", label, value);
+  int written = SAFE_SNPRINTF(buffer, sizeof buffer, "  %-12s %s", label, value);
   if (written < 0)
     return;
 
@@ -981,10 +984,10 @@ void print_flags(uint32_t flags) {
   print_flag_line(stdout, "color space", color_space_name(color_space_bits));
   print_flag_line(stdout, "interp", interpolation_name(interpolation_bits));
 
-  snprintf(buffer, sizeof buffer, "0x%X", encryption_bits);
+  SAFE_SNPRINTF(buffer, sizeof buffer, "0x%X", encryption_bits);
   print_flag_line(stdout, "encryption", buffer);
 
-  snprintf(buffer, sizeof buffer, "0x%02X", metadata_bits);
+  SAFE_SNPRINTF(buffer, sizeof buffer, "0x%02X", metadata_bits);
   print_flag_line(stdout, "metadata", buffer);
 }
 
@@ -1253,26 +1256,26 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   if (!flags_supported(v->header.flags))
     return false;
   if (v->header.pSize == 0) {
-    fprintf(stderr, "❌ Invalid palette size\n");
+    LOG_ERROR("❌ Invalid palette size\n");
     return false;
   }
 
   uint64_t palette_bytes = 0;
   if (!checked_mul_u64((uint64_t)v->header.pSize, (uint64_t)sizeof(Splat4D), &palette_bytes) ||
       palette_bytes > SIZE_MAX) {
-    fprintf(stderr, "❌ Invalid palette size\n");
+    LOG_ERROR("❌ Invalid palette size\n");
     return false;
   }
 
   uint64_t total = 0;
   if (!header_total_indices_checked(&v->header, &total)) {
-    fprintf(stderr, "❌ Invalid index count\n");
+    LOG_ERROR("❌ Invalid index count\n");
     return false;
   }
 
   uint64_t index_bytes = 0;
   if (!checked_mul_u64(total, (uint64_t)sizeof(uint64_t), &index_bytes) || index_bytes > SIZE_MAX) {
-    fprintf(stderr, "❌ Invalid index count\n");
+    LOG_ERROR("❌ Invalid index count\n");
     return false;
   }
 
@@ -1300,8 +1303,7 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   // 1. Recompute CRC from in-memory payload
   uint32_t recomputed = compute_video_checksum(v);
   if (recomputed != v->footer.checksum) {
-    fprintf(stderr, "❌ CRC mismatch: file=0x%08X recomputed=0x%08X\n", v->footer.checksum,
-            recomputed);
+    LOG_ERROR("❌ CRC mismatch: file=0x%08X recomputed=0x%08X\n", v->footer.checksum, recomputed);
     free(v->palette.palette);
     free(v->index.index);
     v->palette.palette = NULL;
@@ -1311,10 +1313,10 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
 
   // 2. Validate offset consistency
   if (!sanity_check_idxoffset_file(fp, &v->header, &v->footer)) {
-    fprintf(stderr, "❌ Index offset mismatch (footer=%" PRIu64 ", expect=%" PRIu64 ")\n",
-            (uint64_t)v->footer.idxoffset,
-            (uint64_t)sizeof(Splat4DHeader) +
-                (uint64_t)v->header.pSize * (uint64_t)sizeof(Splat4D));
+    LOG_ERROR("❌ Index offset mismatch (footer=%" PRIu64 ", expect=%" PRIu64 ")\n",
+              (uint64_t)v->footer.idxoffset,
+              (uint64_t)sizeof(Splat4DHeader) +
+                  (uint64_t)v->header.pSize * (uint64_t)sizeof(Splat4D));
     // free allocations before returning
     free(v->palette.palette);
     free(v->index.index);
@@ -1325,7 +1327,7 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
 
   // 3. Validate footer end marker
   if (v->footer.end != 0x4C505334) {
-    fprintf(stderr, "❌ Invalid footer end marker\n");
+    LOG_ERROR("❌ Invalid footer end marker\n");
     free(v->palette.palette);
     free(v->index.index);
     v->palette.palette = NULL;
@@ -1338,42 +1340,42 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
 
 bool validate_splat4DVideo(const Splat4DVideo *v) {
   if (!v) {
-    fprintf(stderr, "❌ Video reference required\n");
+    LOG_ERROR("❌ Video reference required\n");
     return false;
   }
 
   if (v->header.magic != 0x3453504C) {
-    fprintf(stderr, "❌ Unsupported format\n");
+    LOG_ERROR("❌ Unsupported format\n");
     return false;
   }
 
   if (v->header.version[0] != 1) {
-    fprintf(stderr, "❌ Unsupported version\n");
+    LOG_ERROR("❌ Unsupported version\n");
     return false;
   }
 
   if (v->header.height == 0) {
-    fprintf(stderr, "❌ Positive height required\n");
+    LOG_ERROR("❌ Positive height required\n");
     return false;
   }
 
   if (v->header.width == 0) {
-    fprintf(stderr, "❌ Positive width required\n");
+    LOG_ERROR("❌ Positive width required\n");
     return false;
   }
 
   if (v->header.depth == 0) {
-    fprintf(stderr, "❌ Positive depth required\n");
+    LOG_ERROR("❌ Positive depth required\n");
     return false;
   }
 
   if (v->header.frames == 0) {
-    fprintf(stderr, "❌ Positive number of frames required\n");
+    LOG_ERROR("❌ Positive number of frames required\n");
     return false;
   }
 
   if (v->header.pSize == 0) {
-    fprintf(stderr, "❌ Positive palette size required\n");
+    LOG_ERROR("❌ Positive palette size required\n");
     return false;
   }
 
@@ -1381,14 +1383,13 @@ bool validate_splat4DVideo(const Splat4DVideo *v) {
     return false;
 
   if (v->footer.end != 0x4C505334) {
-    fprintf(stderr, "❌ Invalid end-of-file marker\n");
+    LOG_ERROR("❌ Invalid end-of-file marker\n");
     return false;
   }
 
   uint32_t expected = compute_video_checksum(v);
   if (v->footer.checksum != expected) {
-    fprintf(stderr, "❌ Checksum mismatch (got 0x%08X expected 0x%08X)\n", v->footer.checksum,
-            expected);
+    LOG_ERROR("❌ Checksum mismatch (got 0x%08X expected 0x%08X)\n", v->footer.checksum, expected);
     return false;
   }
 
@@ -1450,57 +1451,57 @@ static bool load_file_into_buffer(const char *path, size_t element_size, void **
 
   FILE *fp = fopen(path, "rb");
   if (!fp) {
-    fprintf(stderr, "❌ Unable to open '%s': %s\n", path, strerror(errno));
+    LOG_ERROR("❌ Unable to open '%s': %s\n", path, strerror(errno));
     return false;
   }
 
   if (fseek(fp, 0, SEEK_END) != 0) {
-    fprintf(stderr, "❌ Failed to seek '%s'\n", path);
+    LOG_ERROR("❌ Failed to seek '%s'\n", path);
     fclose(fp);
     return false;
   }
 
   long size = ftell(fp);
   if (size < 0) {
-    fprintf(stderr, "❌ Failed to determine size of '%s'\n", path);
+    LOG_ERROR("❌ Failed to determine size of '%s'\n", path);
     fclose(fp);
     return false;
   }
 
   if (size % (long)element_size != 0) {
-    fprintf(stderr, "❌ File '%s' is not aligned to element size %zu\n", path, element_size);
+    LOG_ERROR("❌ File '%s' is not aligned to element size %zu\n", path, element_size);
     fclose(fp);
     return false;
   }
 
   uint64_t count = (uint64_t)size / element_size;
   if (count == 0) {
-    fprintf(stderr, "❌ File '%s' does not contain any entries\n", path);
+    LOG_ERROR("❌ File '%s' does not contain any entries\n", path);
     fclose(fp);
     return false;
   }
 
   if (fseek(fp, 0, SEEK_SET) != 0) {
-    fprintf(stderr, "❌ Failed to rewind '%s'\n", path);
+    LOG_ERROR("❌ Failed to rewind '%s'\n", path);
     fclose(fp);
     return false;
   }
 
   if (element_size == 0 || count > SIZE_MAX / element_size) {
-    fprintf(stderr, "❌ File '%s' is too large to load into memory\n", path);
+    LOG_ERROR("❌ File '%s' is too large to load into memory\n", path);
     fclose(fp);
     return false;
   }
 
   void *data = malloc(count * element_size);
   if (!data) {
-    fprintf(stderr, "❌ Out of memory while reading '%s'\n", path);
+    LOG_ERROR("❌ Out of memory while reading '%s'\n", path);
     fclose(fp);
     return false;
   }
 
   if (fread(data, element_size, count, fp) != count) {
-    fprintf(stderr, "❌ Failed to read '%s'\n", path);
+    LOG_ERROR("❌ Failed to read '%s'\n", path);
     free(data);
     fclose(fp);
     return false;
@@ -1518,7 +1519,7 @@ static bool load_palette_from_file(const char *path, Splat4D **palette_out, uint
   if (!load_file_into_buffer(path, sizeof(Splat4D), &buffer, &count))
     return false;
   if (count > UINT32_MAX) {
-    fprintf(stderr, "❌ Palette '%s' has too many entries (%" PRIu64 ")\n", path, count);
+    LOG_ERROR("❌ Palette '%s' has too many entries (%" PRIu64 ")\n", path, count);
     free(buffer);
     return false;
   }
@@ -1537,13 +1538,13 @@ static bool save_buffer_to_file(const char *path, const void *buffer, size_t ele
     return false;
   FILE *fp = fopen(path, "wb");
   if (!fp) {
-    fprintf(stderr, "❌ Unable to write '%s': %s\n", path, strerror(errno));
+    LOG_ERROR("❌ Unable to write '%s': %s\n", path, strerror(errno));
     return false;
   }
   size_t written = fwrite(buffer, element_size, count, fp);
   fclose(fp);
   if (written != count) {
-    fprintf(stderr, "❌ Short write while writing '%s'\n", path);
+    LOG_ERROR("❌ Short write while writing '%s'\n", path);
     return false;
   }
   return true;
@@ -1608,19 +1609,19 @@ static int command_encode(int argc, char **argv) {
                 strcmp(arg, "--palette-size") == 0 || strcmp(arg, "--flags") == 0) &&
                i + 1 < argc) {
       if (!parse_metadata_option(arg, argv[++i], &meta)) {
-        fprintf(stderr, "❌ Invalid value for %s\n", arg);
+        LOG_ERROR("❌ Invalid value for %s\n", arg);
         return EXIT_FAILURE;
       }
     } else {
-      fprintf(stderr, "❌ Unknown or incomplete option '%s'\n", arg);
+      LOG_ERROR("❌ Unknown or incomplete option '%s'\n", arg);
       return EXIT_FAILURE;
     }
   }
 
   if (!palette_path || !index_path || !output_path || !meta.width_set || !meta.height_set ||
       !meta.depth_set || !meta.frames_set) {
-    fprintf(stderr, "❌ encode requires --palette, --index, --output, --width, --height, --depth, "
-                    "and --frames\n");
+    LOG_ERROR("❌ encode requires --palette, --index, --output, --width, --height, --depth, "
+              "and --frames\n");
     return EXIT_FAILURE;
   }
 
@@ -1633,8 +1634,7 @@ static int command_encode(int argc, char **argv) {
     meta.palette_size = palette_count;
 
   if (meta.palette_size != palette_count) {
-    fprintf(stderr, "❌ Palette size mismatch: option=%u file=%u\n", meta.palette_size,
-            palette_count);
+    LOG_ERROR("❌ Palette size mismatch: option=%u file=%u\n", meta.palette_size, palette_count);
     free(palette);
     return EXIT_FAILURE;
   }
@@ -1649,10 +1649,9 @@ static int command_encode(int argc, char **argv) {
   uint64_t expected_indices =
       (uint64_t)meta.width * (uint64_t)meta.height * (uint64_t)meta.depth * (uint64_t)meta.frames;
   if (expected_indices != index_count) {
-    fprintf(stderr,
-            "❌ Index count mismatch: expected %" PRIu64 " (from dimensions) but file has %" PRIu64
-            " entries\n",
-            expected_indices, index_count);
+    LOG_ERROR("❌ Index count mismatch: expected %" PRIu64
+              " (from dimensions) but file has %" PRIu64 " entries\n",
+              expected_indices, index_count);
     free(palette);
     free(indices);
     return EXIT_FAILURE;
@@ -1664,7 +1663,7 @@ static int command_encode(int argc, char **argv) {
 
   FILE *fp = fopen(output_path, "wb");
   if (!fp) {
-    fprintf(stderr, "❌ Unable to create '%s': %s\n", output_path, strerror(errno));
+    LOG_ERROR("❌ Unable to create '%s': %s\n", output_path, strerror(errno));
     free_splat4DVideo(&video);
     return EXIT_FAILURE;
   }
@@ -1674,7 +1673,7 @@ static int command_encode(int argc, char **argv) {
   free_splat4DVideo(&video);
 
   if (!wrote) {
-    fprintf(stderr, "❌ Failed to write 4Splat file '%s'\n", output_path);
+    LOG_ERROR("❌ Failed to write 4Splat file '%s'\n", output_path);
     return EXIT_FAILURE;
   }
 
@@ -1702,19 +1701,19 @@ static int command_decode(int argc, char **argv) {
     } else if (strcmp(arg, "--validate") == 0) {
       do_validate = true;
     } else {
-      fprintf(stderr, "❌ Unknown or incomplete option '%s'\n", arg);
+      LOG_ERROR("❌ Unknown or incomplete option '%s'\n", arg);
       return EXIT_FAILURE;
     }
   }
 
   if (!input_path) {
-    fprintf(stderr, "❌ decode requires --input <file.4spl>\n");
+    LOG_ERROR("❌ decode requires --input <file.4spl>\n");
     return EXIT_FAILURE;
   }
 
   FILE *fp = fopen(input_path, "rb");
   if (!fp) {
-    fprintf(stderr, "❌ Unable to open '%s': %s\n", input_path, strerror(errno));
+    LOG_ERROR("❌ Unable to open '%s': %s\n", input_path, strerror(errno));
     return EXIT_FAILURE;
   }
 
@@ -1723,7 +1722,7 @@ static int command_decode(int argc, char **argv) {
   fclose(fp);
 
   if (!read_ok) {
-    fprintf(stderr, "❌ Failed to read '%s'\n", input_path);
+    LOG_ERROR("❌ Failed to read '%s'\n", input_path);
     return EXIT_FAILURE;
   }
 
