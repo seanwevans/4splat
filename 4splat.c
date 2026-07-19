@@ -609,9 +609,11 @@ static inline void crc32_init(crc32_t *c) { c->v = 0xFFFFFFFFu; }
 
 static inline void crc32_update(crc32_t *c, const void *p, size_t n) {
   const uint8_t *b = p;
+  uint32_t v = c->v;
   for (size_t i = 0; i < n; i++) {
-    c->v = (c->v >> 8) ^ crc32_table[(c->v ^ b[i]) & 0xFF];
+    v = (v >> 8) ^ crc32_table[(v ^ b[i]) & 0xFF];
   }
+  c->v = v;
 }
 
 static inline uint32_t crc32_final(crc32_t *c) { return ~c->v; }
@@ -728,17 +730,17 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
         if (to_pack > items_per_chunk)
           to_pack = items_per_chunk;
 
-        const uint64_t *src = v->index.index + items_streamed;
+        const uint64_t *restrict src = v->index.index + items_streamed;
         if (idx_width == 1) {
-          uint8_t *p = (uint8_t *)pack_buf;
+          uint8_t *restrict p = (uint8_t *)pack_buf;
           for (uint64_t i = 0; i < to_pack; i++)
             p[i] = (uint8_t)src[i];
         } else if (idx_width == 2) {
-          uint16_t *p = (uint16_t *)pack_buf;
+          uint16_t *restrict p = (uint16_t *)pack_buf;
           for (uint64_t i = 0; i < to_pack; i++)
             p[i] = (uint16_t)src[i];
         } else if (idx_width == 4) {
-          uint32_t *p = (uint32_t *)pack_buf;
+          uint32_t *restrict p = (uint32_t *)pack_buf;
           for (uint64_t i = 0; i < to_pack; i++)
             p[i] = (uint32_t)src[i];
         }
@@ -1099,17 +1101,17 @@ bool write_splat4DIndex(FILE *fp, const Splat4DIndex *i, uint64_t total, uint32_
       if (to_pack > items_per_chunk)
         to_pack = items_per_chunk;
 
-      const uint64_t *src = i->index + items_written;
+      const uint64_t *restrict src = i->index + items_written;
       if (idx_width == 1) {
-        uint8_t *p = (uint8_t *)pack_buf;
+        uint8_t *restrict p = (uint8_t *)pack_buf;
         for (uint64_t k = 0; k < to_pack; k++)
           p[k] = (uint8_t)src[k];
       } else if (idx_width == 2) {
-        uint16_t *p = (uint16_t *)pack_buf;
+        uint16_t *restrict p = (uint16_t *)pack_buf;
         for (uint64_t k = 0; k < to_pack; k++)
           p[k] = (uint16_t)src[k];
       } else if (idx_width == 4) {
-        uint32_t *p = (uint32_t *)pack_buf;
+        uint32_t *restrict p = (uint32_t *)pack_buf;
         for (uint64_t k = 0; k < to_pack; k++)
           p[k] = (uint32_t)src[k];
       }
@@ -1157,17 +1159,17 @@ bool read_splat4DIndex(FILE *fp, Splat4DIndex *i, uint64_t total, uint32_t flags
         return false;
       }
 
-      uint64_t *dst = i->index + items_read;
+      uint64_t *restrict dst = i->index + items_read;
       if (idx_width == 1) {
-        uint8_t *p = (uint8_t *)pack_buf;
+        const uint8_t *restrict p = (uint8_t *)pack_buf;
         for (uint64_t k = 0; k < to_read; k++)
           dst[k] = p[k];
       } else if (idx_width == 2) {
-        uint16_t *p = (uint16_t *)pack_buf;
+        const uint16_t *restrict p = (uint16_t *)pack_buf;
         for (uint64_t k = 0; k < to_read; k++)
           dst[k] = p[k];
       } else if (idx_width == 4) {
-        uint32_t *p = (uint32_t *)pack_buf;
+        const uint32_t *restrict p = (uint32_t *)pack_buf;
         for (uint64_t k = 0; k < to_read; k++)
           dst[k] = p[k];
       }
@@ -1592,42 +1594,16 @@ static bool parse_metadata_option(const char *name, const char *value, MetadataO
   return true;
 }
 
-static int command_encode(int argc, char **argv) {
-  const char *palette_path = NULL;
-  const char *index_path = NULL;
-  const char *output_path = NULL;
-  MetadataOptions meta = {0};
 
-  for (int i = 0; i < argc; i++) {
-    const char *arg = argv[i];
-    if (strcmp(arg, "--palette") == 0 && i + 1 < argc) {
-      palette_path = argv[++i];
-    } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
-      index_path = argv[++i];
-    } else if (strcmp(arg, "--output") == 0 && i + 1 < argc) {
-      output_path = argv[++i];
-    } else if ((strcmp(arg, "--width") == 0 || strcmp(arg, "--height") == 0 ||
-                strcmp(arg, "--depth") == 0 || strcmp(arg, "--frames") == 0 ||
-                strcmp(arg, "--palette-size") == 0 || strcmp(arg, "--flags") == 0) &&
-               i + 1 < argc) {
-      if (!parse_metadata_option(arg, argv[++i], &meta)) {
-        LOG_ERROR("❌ Invalid value for %s\n", arg);
-        return EXIT_FAILURE;
-      }
-    } else {
-      LOG_ERROR("❌ Unknown or incomplete option '%s'\n", arg);
-      return EXIT_FAILURE;
-    }
-  }
 
-  if (!palette_path || !index_path || !output_path || !meta.width_set || !meta.height_set ||
-      !meta.depth_set || !meta.frames_set) {
-    LOG_ERROR("❌ encode requires --palette, --index, --output, --width, --height, --depth, "
-              "and --frames\n");
-    return EXIT_FAILURE;
-  }
+typedef struct {
+  const char *palette_path;
+  const char *index_path;
+  const char *output_path;
+  MetadataOptions meta;
+} EncodeOptions;
 
-  static int execute_encode(EncodeOptions * opts) {
+static int execute_encode(EncodeOptions * opts) {
     Splat4D *palette = NULL;
     uint32_t palette_count = 0;
     if (!load_palette_from_file(opts->palette_path, &palette, &palette_count))
@@ -1636,8 +1612,8 @@ static int command_encode(int argc, char **argv) {
     if (!opts->meta.palette_size_set)
       opts->meta.palette_size = palette_count;
 
-    if (meta.palette_size != palette_count) {
-      LOG_ERROR("❌ Palette size mismatch: option=%u file=%u\n", meta.palette_size, palette_count);
+    if (opts->meta.palette_size != palette_count) {
+      LOG_ERROR("❌ Palette size mismatch: option=%u file=%u\n", opts->meta.palette_size, palette_count);
       free(palette);
       return EXIT_FAILURE;
     }
@@ -1667,7 +1643,7 @@ static int command_encode(int argc, char **argv) {
 
     FILE *fp = fopen(opts->output_path, "wb");
     if (!fp) {
-      LOG_ERROR("❌ Unable to create '%s': %s\n", output_path, strerror(errno));
+      LOG_ERROR("❌ Unable to create '%s': %s\n", opts->output_path, strerror(errno));
       free_splat4DVideo(&video);
       return EXIT_FAILURE;
     }
@@ -1677,7 +1653,7 @@ static int command_encode(int argc, char **argv) {
     free_splat4DVideo(&video);
 
     if (!wrote) {
-      LOG_ERROR("❌ Failed to write 4Splat file '%s'\n", output_path);
+      LOG_ERROR("❌ Failed to write 4Splat file '%s'\n", opts->output_path);
       return EXIT_FAILURE;
     }
 
@@ -1685,7 +1661,7 @@ static int command_encode(int argc, char **argv) {
     return EXIT_SUCCESS;
   }
 
-  static int command_encode(int argc, char **argv) {
+static int command_encode(int argc, char **argv) {
     EncodeOptions opts = {0};
 
     for (int i = 0; i < argc; i++) {
@@ -1719,9 +1695,9 @@ static int command_encode(int argc, char **argv) {
     }
 
     return execute_encode(&opts);
-  }
+}
 
-  static int command_decode(int argc, char **argv) {
+static int command_decode(int argc, char **argv) {
     const char *input_path = NULL;
     const char *palette_out = NULL;
     const char *index_out = NULL;
@@ -1786,9 +1762,9 @@ static int command_encode(int argc, char **argv) {
 
     free_splat4DVideo(&video);
     return EXIT_SUCCESS;
-  }
+}
 
-  int main(int argc, char **argv) {
+int main(int argc, char **argv) {
     if (argc < 2) {
       print_usage(stderr);
       return EXIT_FAILURE;
@@ -1804,5 +1780,5 @@ static int command_encode(int argc, char **argv) {
 
     print_usage(stderr);
     return EXIT_FAILURE;
-  }
+}
 #endif // UNIT_TEST
