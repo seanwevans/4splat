@@ -609,9 +609,11 @@ static inline void crc32_init(crc32_t *c) { c->v = 0xFFFFFFFFu; }
 
 static inline void crc32_update(crc32_t *c, const void *p, size_t n) {
   const uint8_t *b = p;
+  uint32_t v = c->v;
   for (size_t i = 0; i < n; i++) {
-    c->v = (c->v >> 8) ^ crc32_table[(c->v ^ b[i]) & 0xFF];
+    v = (v >> 8) ^ crc32_table[(v ^ b[i]) & 0xFF];
   }
+  c->v = v;
 }
 
 static inline uint32_t crc32_final(crc32_t *c) { return ~c->v; }
@@ -728,17 +730,17 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
         if (to_pack > items_per_chunk)
           to_pack = items_per_chunk;
 
-        const uint64_t *src = v->index.index + items_streamed;
+        const uint64_t *restrict src = v->index.index + items_streamed;
         if (idx_width == 1) {
-          uint8_t *p = (uint8_t *)pack_buf;
+          uint8_t *restrict p = (uint8_t *)pack_buf;
           for (uint64_t i = 0; i < to_pack; i++)
             p[i] = (uint8_t)src[i];
         } else if (idx_width == 2) {
-          uint16_t *p = (uint16_t *)pack_buf;
+          uint16_t *restrict p = (uint16_t *)pack_buf;
           for (uint64_t i = 0; i < to_pack; i++)
             p[i] = (uint16_t)src[i];
         } else if (idx_width == 4) {
-          uint32_t *p = (uint32_t *)pack_buf;
+          uint32_t *restrict p = (uint32_t *)pack_buf;
           for (uint64_t i = 0; i < to_pack; i++)
             p[i] = (uint32_t)src[i];
         }
@@ -1099,17 +1101,17 @@ bool write_splat4DIndex(FILE *fp, const Splat4DIndex *i, uint64_t total, uint32_
       if (to_pack > items_per_chunk)
         to_pack = items_per_chunk;
 
-      const uint64_t *src = i->index + items_written;
+      const uint64_t *restrict src = i->index + items_written;
       if (idx_width == 1) {
-        uint8_t *p = (uint8_t *)pack_buf;
+        uint8_t *restrict p = (uint8_t *)pack_buf;
         for (uint64_t k = 0; k < to_pack; k++)
           p[k] = (uint8_t)src[k];
       } else if (idx_width == 2) {
-        uint16_t *p = (uint16_t *)pack_buf;
+        uint16_t *restrict p = (uint16_t *)pack_buf;
         for (uint64_t k = 0; k < to_pack; k++)
           p[k] = (uint16_t)src[k];
       } else if (idx_width == 4) {
-        uint32_t *p = (uint32_t *)pack_buf;
+        uint32_t *restrict p = (uint32_t *)pack_buf;
         for (uint64_t k = 0; k < to_pack; k++)
           p[k] = (uint32_t)src[k];
       }
@@ -1157,17 +1159,17 @@ bool read_splat4DIndex(FILE *fp, Splat4DIndex *i, uint64_t total, uint32_t flags
         return false;
       }
 
-      uint64_t *dst = i->index + items_read;
+      uint64_t *restrict dst = i->index + items_read;
       if (idx_width == 1) {
-        uint8_t *p = (uint8_t *)pack_buf;
+        const uint8_t *restrict p = (uint8_t *)pack_buf;
         for (uint64_t k = 0; k < to_read; k++)
           dst[k] = p[k];
       } else if (idx_width == 2) {
-        uint16_t *p = (uint16_t *)pack_buf;
+        const uint16_t *restrict p = (uint16_t *)pack_buf;
         for (uint64_t k = 0; k < to_read; k++)
           dst[k] = p[k];
       } else if (idx_width == 4) {
-        uint32_t *p = (uint32_t *)pack_buf;
+        const uint32_t *restrict p = (uint32_t *)pack_buf;
         for (uint64_t k = 0; k < to_read; k++)
           dst[k] = p[k];
       }
