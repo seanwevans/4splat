@@ -749,10 +749,13 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
             p[i] = (uint32_t)src[i];
         }
 
-        if (idx_width > 0 && to_pack > SIZE_MAX / idx_width)
+        uint64_t packed_bytes;
+        if (!checked_mul_u64(to_pack, idx_width, &packed_bytes))
+          return false;
+        if (packed_bytes > SIZE_MAX)
           return false;
 
-        if (!fn(pack_buf, (size_t)(to_pack * idx_width), ctx))
+        if (!fn(pack_buf, (size_t)packed_bytes, ctx))
           return false;
         items_streamed += to_pack;
       }
