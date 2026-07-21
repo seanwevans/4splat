@@ -50,7 +50,8 @@ static bool test_create_splat4D(void) {
 }
 
 static bool test_create_splat4D_zero_values(void) {
-  Splat4D splat = create_splat4D(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+  Splat4D splat =
+      create_splat4D(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 
   return splat.mu_x == 0.0f && splat.sigma_x == 0.0f && splat.mu_y == 0.0f &&
          splat.sigma_y == 0.0f && splat.mu_z == 0.0f && splat.sigma_z == 0.0f &&
