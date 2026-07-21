@@ -28,7 +28,6 @@ import numpy as np
 from matplotlib.colors import ListedColormap
 from matplotlib.widgets import CheckButtons, Slider
 
-
 HEADER_STRUCT = struct.Struct("<4s4B6I")
 PALETTE_ENTRY_FLOATS = 12
 PALETTE_ENTRY_SIZE = PALETTE_ENTRY_FLOATS * 4
@@ -211,6 +210,11 @@ class FourSplatParser:
         self, data: bytes, offset: int, voxel_count: int, index_bytes: int
     ) -> Tuple[np.ndarray, int]:
         total_bytes = voxel_count * index_bytes
+
+        # Security mitigation: limit total index data allocation to 2 GB
+        if total_bytes > 2 * 1024 * 1024 * 1024:
+            raise ValueError("Index data size exceeds 2GB limit")
+
         end = offset + total_bytes
         if len(data) < end:
             raise ValueError("Index data truncated")
