@@ -49,6 +49,16 @@ static bool test_create_splat4D(void) {
          splat.b == b && splat.alpha == alpha;
 }
 
+static bool test_create_splat4D_zero_values(void) {
+  Splat4D splat =
+      create_splat4D(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+
+  return splat.mu_x == 0.0f && splat.sigma_x == 0.0f && splat.mu_y == 0.0f &&
+         splat.sigma_y == 0.0f && splat.mu_z == 0.0f && splat.sigma_z == 0.0f &&
+         splat.mu_t == 0.0f && splat.sigma_t == 0.0f && splat.r == 0.0f && splat.g == 0.0f &&
+         splat.b == 0.0f && splat.alpha == 0.0f;
+}
+
 static bool test_crc32_known_value(void) {
   const char *input = "123456789";
   uint32_t actual = crc32(input, strlen(input));
@@ -690,6 +700,7 @@ static bool test_stream_splat4DVideo_stops_on_consumer_error(void) {
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
+    {"create_splat4D_zero_values", test_create_splat4D_zero_values},
     {"crc32_known_value", test_crc32_known_value},
     {"checksum_matches_footer", test_compute_video_checksum_matches_footer},
     {"idxoffset_helpers_agree", test_idxoffset_helpers_agree},
