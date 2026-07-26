@@ -1268,6 +1268,17 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   if (!read_splat4DHeader(fp, &v->header))
     return false;
 
+  // Reject files that are not 4Splat containers before sizing any allocation
+  // from attacker-controlled header dimensions.
+  if (v->header.magic != 0x3453504C) {
+    LOG_ERROR("❌ Unsupported format\n");
+    return false;
+  }
+  if (v->header.version[0] != 1) {
+    LOG_ERROR("❌ Unsupported version\n");
+    return false;
+  }
+
   if (!flags_supported(v->header.flags))
     return false;
   if (v->header.pSize == 0) {
