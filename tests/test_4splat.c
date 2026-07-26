@@ -114,6 +114,29 @@ static bool test_idxoffset_reverse_handles_large_files(void) {
   return index_bytes > UINT32_MAX && expected == forward && reverse == forward;
 }
 
+static bool test_check_index_values_accepts_valid(void) {
+  uint64_t indices[4] = {0, 1, 0, 1};
+  uint64_t bad_pos = 12345;
+  // pSize 2, 1-byte width: all entries valid and representable.
+  return check_index_values(indices, 4, /*pSize=*/2, /*idx_width=*/1, &bad_pos) == SPLAT_INDEX_OK;
+}
+
+static bool test_check_index_values_rejects_out_of_range(void) {
+  uint64_t indices[4] = {0, 1, 5, 1};
+  uint64_t bad_pos = 0;
+  SplatIndexCheck r = check_index_values(indices, 4, /*pSize=*/2, /*idx_width=*/8, &bad_pos);
+  return r == SPLAT_INDEX_OUT_OF_RANGE && bad_pos == 2;
+}
+
+static bool test_check_index_values_detects_too_wide(void) {
+  // Valid palette references (< pSize) that nevertheless overflow a 1-byte
+  // index width must be rejected rather than silently truncated on write.
+  uint64_t indices[3] = {10, 300, 20};
+  uint64_t bad_pos = 0;
+  SplatIndexCheck r = check_index_values(indices, 3, /*pSize=*/1000, /*idx_width=*/1, &bad_pos);
+  return r == SPLAT_INDEX_TOO_WIDE && bad_pos == 1;
+}
+
 static bool test_validate_succeeds_for_valid_video(void) {
   Splat4D palette[2];
   uint64_t indices[4];
@@ -777,6 +800,9 @@ static test_case TESTS[] = {
     {"idxoffset_helpers_agree", test_idxoffset_helpers_agree},
     {"idxoffset_forward_handles_large_palette", test_idxoffset_forward_handles_large_palette},
     {"idxoffset_reverse_handles_large_files", test_idxoffset_reverse_handles_large_files},
+    {"check_index_values_accepts_valid", test_check_index_values_accepts_valid},
+    {"check_index_values_rejects_out_of_range", test_check_index_values_rejects_out_of_range},
+    {"check_index_values_detects_too_wide", test_check_index_values_detects_too_wide},
     {"validate_succeeds_for_valid_video", test_validate_succeeds_for_valid_video},
     {"validate_fails_for_bad_checksum", test_validate_fails_for_bad_checksum},
     {"validate_fails_for_null_video", test_validate_fails_for_null_video},

@@ -682,6 +682,44 @@ static uint8_t get_index_width_bytes(uint32_t flags) {
   return 8; // SPLAT_INDEX_WIDTH_64
 }
 
+// Largest index value representable in idx_width bytes.
+static uint64_t index_width_max_value(uint8_t idx_width) {
+  if (idx_width >= 8)
+    return UINT64_MAX;
+  return ((uint64_t)1 << (8u * idx_width)) - 1u;
+}
+
+typedef enum {
+  SPLAT_INDEX_OK = 0,
+  SPLAT_INDEX_OUT_OF_RANGE = 1, // references a palette slot that does not exist
+  SPLAT_INDEX_TOO_WIDE = 2,     // does not fit the selected index width
+} SplatIndexCheck;
+
+// Verify that every entry is a valid palette reference (< pSize) and fits the
+// selected index width, so that packing to that width will not silently
+// truncate the value. On failure *bad_pos (when non-NULL) receives the offset
+// of the first offending entry.
+static SplatIndexCheck check_index_values(const uint64_t *indices, uint64_t count, uint32_t pSize,
+                                          uint8_t idx_width, uint64_t *bad_pos) {
+  if (!indices)
+    return SPLAT_INDEX_OUT_OF_RANGE;
+
+  uint64_t max_repr = index_width_max_value(idx_width);
+  for (uint64_t i = 0; i < count; ++i) {
+    if (indices[i] >= pSize) {
+      if (bad_pos)
+        *bad_pos = i;
+      return SPLAT_INDEX_OUT_OF_RANGE;
+    }
+    if (indices[i] > max_repr) {
+      if (bad_pos)
+        *bad_pos = i;
+      return SPLAT_INDEX_TOO_WIDE;
+    }
+  }
+  return SPLAT_INDEX_OK;
+}
+
 static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Splat4DChunkFn fn,
                                          void *ctx) {
   if (!v || !fn)
@@ -1657,9 +1695,30 @@ static int execute_encode(EncodeOptions *opts) {
     return EXIT_FAILURE;
   }
 
+  uint32_t effective_flags = opts->meta.flags_set ? opts->meta.flags : 0u;
+  uint8_t idx_width = get_index_width_bytes(effective_flags);
+  uint64_t bad_pos = 0;
+  SplatIndexCheck idx_check =
+      check_index_values(indices, index_count, opts->meta.palette_size, idx_width, &bad_pos);
+  if (idx_check == SPLAT_INDEX_OUT_OF_RANGE) {
+    LOG_ERROR("❌ Index %" PRIu64 " at position %" PRIu64 " is out of range for palette size %u\n",
+              indices[bad_pos], bad_pos, opts->meta.palette_size);
+    free(palette);
+    free(indices);
+    return EXIT_FAILURE;
+  }
+  if (idx_check == SPLAT_INDEX_TOO_WIDE) {
+    LOG_ERROR("❌ Index %" PRIu64 " at position %" PRIu64 " does not fit the %u-byte index width; "
+              "select a wider index width via --flags\n",
+              indices[bad_pos], bad_pos, idx_width);
+    free(palette);
+    free(indices);
+    return EXIT_FAILURE;
+  }
+
   Splat4DHeader header =
       create_splat4DHeader(opts->meta.width, opts->meta.height, opts->meta.depth, opts->meta.frames,
-                           opts->meta.palette_size, opts->meta.flags_set ? opts->meta.flags : 0u);
+                           opts->meta.palette_size, effective_flags);
   Splat4DVideo video = create_splat4DVideo(header, palette, indices);
 
   FILE *fp = fopen(opts->output_path, "wb");
