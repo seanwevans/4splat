@@ -583,6 +583,62 @@ static bool test_read_video_fails_on_invalid_footer_marker(void) {
   return failed;
 }
 
+// Build an on-disk video whose stored checksum is valid for the (possibly
+// mutated) header, so that read validation must reject it for a reason other
+// than a CRC mismatch. Returns false on any I/O failure.
+static bool write_video_with_header(FILE *fp, Splat4DHeader header) {
+  Splat4D palette_data[2];
+  uint64_t indices[4];
+  make_palette(palette_data);
+  make_indices(indices);
+  // create_splat4DVideo computes the checksum over the header as given, so a
+  // mutated magic/version is still covered by a matching CRC.
+  Splat4DVideo video = create_splat4DVideo(header, palette_data, indices);
+  return write_splat4DVideo(fp, &video);
+}
+
+static bool test_read_video_rejects_bad_magic(void) {
+  Splat4DHeader header = make_header();
+  header.magic = 0xDEADBEEFu;
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  if (!write_video_with_header(fp, header)) {
+    fclose(fp);
+    return false;
+  }
+  rewind(fp);
+
+  Splat4DVideo loaded;
+  memset(&loaded, 0, sizeof loaded);
+  bool failed = !read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  free_splat4DVideo(&loaded);
+  return failed;
+}
+
+static bool test_read_video_rejects_bad_version(void) {
+  Splat4DHeader header = make_header();
+  header.version[0] = 2;
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  if (!write_video_with_header(fp, header)) {
+    fclose(fp);
+    return false;
+  }
+  rewind(fp);
+
+  Splat4DVideo loaded;
+  memset(&loaded, 0, sizeof loaded);
+  bool failed = !read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  free_splat4DVideo(&loaded);
+  return failed;
+}
+
 static bool test_header_total_indices_checked(void) {
   uint64_t total = 0;
   Splat4DHeader h = make_header();
@@ -740,6 +796,8 @@ static test_case TESTS[] = {
     {"read_video_fails_on_crc_mismatch", test_read_video_fails_on_crc_mismatch},
     {"read_video_rejects_big_endian_flag", test_read_video_rejects_big_endian_flag},
     {"read_video_fails_on_invalid_footer_marker", test_read_video_fails_on_invalid_footer_marker},
+    {"read_video_rejects_bad_magic", test_read_video_rejects_bad_magic},
+    {"read_video_rejects_bad_version", test_read_video_rejects_bad_version},
     {"idxoffset_sanity_mismatch", test_idxoffset_sanity_mismatch},
     {"header_defaults_to_float32_precision", test_header_defaults_to_float32_precision},
     {"stream_splat4DVideo_success", test_stream_splat4DVideo_success},
