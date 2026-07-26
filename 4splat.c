@@ -800,11 +800,11 @@ uint32_t compute_video_checksum(const Splat4DVideo *v) {
   return crc32_final(&c);
 }
 
-uint32_t compute_idxoffset_forward(const Splat4DHeader *h) {
-  return sizeof(Splat4DHeader) + h->pSize * sizeof(Splat4D);
+uint64_t compute_idxoffset_forward(const Splat4DHeader *h) {
+  return (uint64_t)sizeof(Splat4DHeader) + (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
 }
 
-uint32_t compute_idxoffset_reverse(const Splat4DHeader *h) {
+uint64_t compute_idxoffset_reverse(const Splat4DHeader *h) {
   uint64_t total = header_total_indices(h);
   uint64_t header_bytes = sizeof(Splat4DHeader);
   uint64_t palette_bytes = (uint64_t)h->pSize * sizeof(Splat4D);
@@ -813,7 +813,7 @@ uint32_t compute_idxoffset_reverse(const Splat4DHeader *h) {
   uint64_t footer_bytes = sizeof(Splat4DFooter);
   uint64_t filesize = header_bytes + palette_bytes + index_bytes + footer_bytes;
   uint64_t offset = filesize - (footer_bytes + index_bytes);
-  return (uint32_t)offset;
+  return offset;
 }
 
 bool sanity_check_idxoffset_file(FILE *fp, const Splat4DHeader *h, const Splat4DFooter *f) {

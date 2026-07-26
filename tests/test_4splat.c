@@ -78,10 +78,25 @@ static bool test_compute_video_checksum_matches_footer(void) {
 
 static bool test_idxoffset_helpers_agree(void) {
   Splat4DHeader header = make_header();
-  uint32_t forward = compute_idxoffset_forward(&header);
-  uint32_t reverse = compute_idxoffset_reverse(&header);
-  uint32_t expected = sizeof(Splat4DHeader) + header.pSize * sizeof(Splat4D);
+  uint64_t forward = compute_idxoffset_forward(&header);
+  uint64_t reverse = compute_idxoffset_reverse(&header);
+  uint64_t expected =
+      (uint64_t)sizeof(Splat4DHeader) + (uint64_t)header.pSize * (uint64_t)sizeof(Splat4D);
   return forward == reverse && forward == expected;
+}
+
+static bool test_idxoffset_forward_handles_large_palette(void) {
+  // A palette large enough that the index offset (header + palette bytes) exceeds
+  // 4 GiB must not be truncated when reported as a 64-bit offset.
+  Splat4DHeader header =
+      create_splat4DHeader(/*width=*/1, /*height=*/1, /*depth=*/1, /*frames=*/1,
+                           /*pSize=*/100000000u, /*flags=*/SPLAT_FLAG_PRECISION_FLOAT32);
+
+  uint64_t expected =
+      (uint64_t)sizeof(Splat4DHeader) + (uint64_t)header.pSize * (uint64_t)sizeof(Splat4D);
+  uint64_t forward = compute_idxoffset_forward(&header);
+
+  return expected > UINT32_MAX && forward == expected;
 }
 
 static bool test_idxoffset_reverse_handles_large_files(void) {
@@ -92,11 +107,11 @@ static bool test_idxoffset_reverse_handles_large_files(void) {
                            /*pSize=*/1, /*flags=*/SPLAT_FLAG_PRECISION_FLOAT32);
 
   uint64_t index_bytes = header_total_indices(&header) * sizeof(uint64_t);
-  uint32_t forward = compute_idxoffset_forward(&header);
-  uint32_t reverse = compute_idxoffset_reverse(&header);
+  uint64_t forward = compute_idxoffset_forward(&header);
+  uint64_t reverse = compute_idxoffset_reverse(&header);
   uint64_t expected = (uint64_t)sizeof(Splat4DHeader) + (uint64_t)header.pSize * sizeof(Splat4D);
 
-  return index_bytes > UINT32_MAX && expected == (uint64_t)forward && reverse == forward;
+  return index_bytes > UINT32_MAX && expected == forward && reverse == forward;
 }
 
 static bool test_validate_succeeds_for_valid_video(void) {
@@ -704,6 +719,7 @@ static test_case TESTS[] = {
     {"crc32_known_value", test_crc32_known_value},
     {"checksum_matches_footer", test_compute_video_checksum_matches_footer},
     {"idxoffset_helpers_agree", test_idxoffset_helpers_agree},
+    {"idxoffset_forward_handles_large_palette", test_idxoffset_forward_handles_large_palette},
     {"idxoffset_reverse_handles_large_files", test_idxoffset_reverse_handles_large_files},
     {"validate_succeeds_for_valid_video", test_validate_succeeds_for_valid_video},
     {"validate_fails_for_bad_checksum", test_validate_fails_for_bad_checksum},
