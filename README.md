@@ -162,6 +162,48 @@
  ╰───────────────────────────────────────────────────────────────────────╯
 ```
 
+## Building
+
+The codec is a single translation unit. A bare build is fully self-contained and
+needs no third-party libraries:
+
+```bash
+make plain          # or: gcc -Wall -Wpedantic -std=c11 -o 4splat 4splat.c
+```
+
+In this configuration the index payload can be stored with the **None** or
+**RLE** compression schemes. The remaining schemes in the format spec are
+provided by mature third-party libraries, enabled at compile time:
+
+```bash
+make                # full-featured build (links all backends below)
+```
+
+| Flag value | Scheme | Backend | Build macro |
+| --- | --- | --- | --- |
+| `0000` | None | built-in | always |
+| `0001` | RLE | built-in | always |
+| `0010` | DEFLATE | zlib (raw) | `SPLAT_WITH_ZLIB` |
+| `0101` | zlib | zlib | `SPLAT_WITH_ZLIB` |
+| `0110` | bzip2 | libbz2 | `SPLAT_WITH_BZIP2` |
+| `0111` | LZMA | liblzma | `SPLAT_WITH_LZMA` |
+| `1001` | XZ | liblzma | `SPLAT_WITH_LZMA` |
+| `1010` | LZ4 | liblz4 | `SPLAT_WITH_LZ4` |
+| `1101` | Brotli | libbrotli | `SPLAT_WITH_BROTLI` |
+| `1111` | Zstd | libzstd | `SPLAT_WITH_ZSTD` |
+
+`SPLAT_WITH_ALL` turns on every backend at once. The remaining scheme values
+(RAR, LZO, ZPAQ, Snappy, LZHAM, LZFSE) have no free-to-link encoder available and
+are rejected on read with a clear diagnostic. Compression applies only to the
+index section; the checksum always covers the uncompressed logical payload, so a
+file written by one build reads identically on another regardless of the codec
+library version.
+
+The palette is stored at the precision named by the header's precision field —
+float16, float32 (default) or float64 — and every descriptive flag field (index
+width, splat shape, color space, interpolation, sort order and the metadata byte)
+round-trips unchanged.
+
 ## Test Suite
 
 | Test | Description |
