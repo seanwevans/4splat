@@ -2437,6 +2437,8 @@ typedef struct {
   const char *index_path;
   const char *output_path;
   MetadataOptions meta;
+  bool precision_set;       // an explicit --precision was given
+  uint32_t precision_value; // 0=float16, 1=float32, 2=float64
 } EncodeOptions;
 
 static void print_usage(FILE *stream) {
@@ -2444,6 +2446,10 @@ static void print_usage(FILE *stream) {
           "Usage:\n"
           "  4splat encode --palette <palette.bin> --index <index.bin> --output <file.4spl> "
           "--width <w> --height <h> --depth <d> --frames <f> [--palette-size <n>] [--flags <n>]\n"
+          "      [--precision float16|float32|float64] [--compression <scheme>] "
+          "[--index-width 1|2|4|8]\n"
+          "      [--splat-shape <shape>] [--color-space <space>] [--interpolation <mode>] "
+          "[--sorted] [--metadata <0-255>]\n"
           "  4splat decode --input <file.4spl> [--palette <palette.bin>] [--index <index.bin>] "
           "[--output <file.4spl>] [--to-color <space>] [--print] [--validate]\n");
 }
@@ -2477,6 +2483,79 @@ static bool parse_color_space_name(const char *name, uint32_t *out) {
     }
   }
   return false;
+}
+
+static bool lookup_named_value(const char *name, uint32_t *out, const char *const *names,
+                               size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    if (names[i] && strcmp(name, names[i]) == 0) {
+      *out = (uint32_t)i;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool parse_precision_name(const char *name, uint32_t *out) {
+  if (!strcmp(name, "float16") || !strcmp(name, "f16") || !strcmp(name, "16"))
+    *out = 0;
+  else if (!strcmp(name, "float32") || !strcmp(name, "f32") || !strcmp(name, "32"))
+    *out = 1;
+  else if (!strcmp(name, "float64") || !strcmp(name, "f64") || !strcmp(name, "64"))
+    *out = 2;
+  else
+    return false;
+  return true;
+}
+
+static bool parse_index_width_name(const char *name, uint32_t *out) {
+  if (!strcmp(name, "1"))
+    *out = SPLAT_INDEX_WIDTH_8;
+  else if (!strcmp(name, "2"))
+    *out = SPLAT_INDEX_WIDTH_16;
+  else if (!strcmp(name, "4"))
+    *out = SPLAT_INDEX_WIDTH_32;
+  else if (!strcmp(name, "8"))
+    *out = SPLAT_INDEX_WIDTH_64;
+  else
+    return false;
+  return true;
+}
+
+static bool parse_splat_shape_name(const char *name, uint32_t *out) {
+  static const char *const names[] = {"isotropic", "axis-aligned", "full-covariance"};
+  return lookup_named_value(name, out, names, sizeof(names) / sizeof(names[0]));
+}
+
+static bool parse_compression_name(const char *name, uint32_t *out) {
+  static const char *const names[] = {"none",  "rle",    "deflate", "rar", "lzo", "zlib",
+                                      "bzip2", "lzma",   "zpaq",    "xz",  "lz4", "snappy",
+                                      "lzham", "brotli", "lzfse",   "zstd"};
+  return lookup_named_value(name, out, names, sizeof(names) / sizeof(names[0]));
+}
+
+static bool parse_interpolation_name(const char *name, uint32_t *out) {
+  static const char *const names[] = {"none",
+                                      "nearest",
+                                      "axis-aligned",
+                                      "smooth",
+                                      "lanczos",
+                                      "gaussian",
+                                      "catmull-rom",
+                                      "nurbs",
+                                      "rbf",
+                                      "optical-flow",
+                                      "neural",
+                                      "akima",
+                                      "inverse-distance",
+                                      "fourier",
+                                      "moving-least-squares",
+                                      "cubic-hermite"};
+  return lookup_named_value(name, out, names, sizeof(names) / sizeof(names[0]));
+}
+
+static void set_flag_field(uint32_t *flags, uint32_t mask, uint32_t shift, uint32_t value) {
+  *flags = (*flags & ~mask) | ((value << shift) & mask);
 }
 
 static bool parse_u32(const char *arg, uint32_t *out) {
@@ -2685,7 +2764,7 @@ static int execute_encode(EncodeOptions *opts) {
   }
   if (idx_check == SPLAT_INDEX_TOO_WIDE) {
     LOG_ERROR("❌ Index %" PRIu64 " at position %" PRIu64 " does not fit the %u-byte index width; "
-              "select a wider index width via --flags\n",
+              "select a wider index width via --index-width\n",
               indices[bad_pos], bad_pos, idx_width);
     free(palette);
     free(indices);
@@ -2695,6 +2774,20 @@ static int execute_encode(EncodeOptions *opts) {
   Splat4DHeader header =
       create_splat4DHeader(opts->meta.width, opts->meta.height, opts->meta.depth, opts->meta.frames,
                            opts->meta.palette_size, effective_flags);
+  // create_splat4DHeader normalizes an unset precision (float16 bits) up to
+  // float32; honor an explicit --precision float16 by restoring it here.
+  if (opts->precision_set)
+    set_flag_field(&header.flags, SPLAT_FLAG_PRECISION_MASK, SPLAT_FLAG_PRECISION_SHIFT,
+                   opts->precision_value);
+
+  // Refuse to emit a file this build could not read back (unsupported precision,
+  // a compression codec that is not linked in, reserved/encrypted fields).
+  if (!flags_supported(header.flags)) {
+    free(palette);
+    free(indices);
+    return EXIT_FAILURE;
+  }
+
   Splat4DVideo video = create_splat4DVideo(header, palette, indices);
 
   FILE *fp = fopen(opts->output_path, "wb");
@@ -2736,6 +2829,72 @@ static int command_encode(int argc, char **argv) {
         fprintf(stderr, "❌ Invalid value for %s\n", arg);
         return EXIT_FAILURE;
       }
+    } else if (strcmp(arg, "--precision") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_precision_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Unknown precision '%s' (float16|float32|float64)\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      opts.precision_set = true;
+      opts.precision_value = v;
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_PRECISION_MASK, SPLAT_FLAG_PRECISION_SHIFT, v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--compression") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_compression_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Unknown compression scheme '%s'\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_COMPRESSION_MASK, SPLAT_FLAG_COMPRESSION_SHIFT,
+                     v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--index-width") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_index_width_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Invalid index width '%s' (1|2|4|8)\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_INDEX_WIDTH_MASK, SPLAT_FLAG_INDEX_WIDTH_SHIFT,
+                     v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--splat-shape") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_splat_shape_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Unknown splat shape '%s' (isotropic|axis-aligned|full-covariance)\n",
+                argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_SPLAT_SHAPE_MASK, SPLAT_FLAG_SPLAT_SHAPE_SHIFT,
+                     v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--color-space") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_color_space_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Unknown color space '%s'\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_COLOR_SPACE_MASK, SPLAT_FLAG_COLOR_SPACE_SHIFT,
+                     v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--interpolation") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_interpolation_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Unknown interpolation '%s'\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_INTERP_MASK, SPLAT_FLAG_INTERP_SHIFT, v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--metadata") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_u32(argv[++i], &v) || v > 0xFF) {
+        fprintf(stderr, "❌ Invalid metadata byte '%s' (0-255)\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_METADATA_MASK, SPLAT_FLAG_METADATA_SHIFT, v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--sorted") == 0) {
+      opts.meta.flags |= SPLAT_FLAG_SORTED;
+      opts.meta.flags_set = true;
     } else {
       fprintf(stderr, "❌ Unknown or incomplete option '%s'\n", arg);
       return EXIT_FAILURE;

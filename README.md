@@ -204,6 +204,35 @@ float16, float32 (default) or float64 — and every descriptive flag field (inde
 width, splat shape, color space, interpolation, sort order and the metadata byte)
 round-trips unchanged.
 
+## Selecting flags on the command line
+
+Rather than computing a raw `--flags` integer, `encode` accepts a named option
+for each flag field:
+
+```bash
+4splat encode --palette pal.bin --index idx.bin --output out.4spl \
+  --width 20 --height 20 --depth 1 --frames 1 \
+  --precision float64 --compression zstd --index-width 2 \
+  --color-space rec2020 --splat-shape axis-aligned --interpolation lanczos \
+  --sorted --metadata 42
+```
+
+| Option | Values |
+| --- | --- |
+| `--precision` | `float16`, `float32` (default), `float64` |
+| `--compression` | `none`, `rle`, `deflate`, `zlib`, `bzip2`, `lzma`, `xz`, `lz4`, `brotli`, `zstd` (plus the spec's other names, rejected if unbuilt) |
+| `--index-width` | `1`, `2`, `4`, `8` (bytes) |
+| `--splat-shape` | `isotropic`, `axis-aligned`, `full-covariance` |
+| `--color-space` | `srgb`, `rec2020`, `display-p3`, … (see below) |
+| `--interpolation` | `none`, `nearest`, `lanczos`, `gaussian`, … |
+| `--sorted` | (flag, no value) |
+| `--metadata` | `0`–`255` |
+
+`encode` refuses up front to write a file the current build could not read back
+— for example selecting `--compression zstd` in the dependency-free build fails
+with a clear message rather than producing an unreadable file. A raw `--flags`
+value is still accepted and individual named options override their field.
+
 ## Color-space conversion
 
 When built with LittleCMS (`SPLAT_WITH_LCMS2`, included in `make`), `decode` can
