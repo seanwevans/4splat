@@ -162,7 +162,7 @@ def create_dummy_4splat_data(
     depth=1,
     frames=1,
     palette_size=1,
-    flags=0x0000,
+    flags=0x0404,  # float32 precision + axis-aligned shape
     checksum=12345,
     idxoffset=100,
 ):
@@ -182,12 +182,10 @@ def create_dummy_4splat_data(
         flags,
     )
 
-    # PALETTE: palette_size * 12 floats (48 bytes each)
-    palette_data = []
-    for _ in range(palette_size):
-        # mu_x, mu_y, mu_z, sigma_x, sigma_y, sigma_z, mu_t, sigma_t, r, g, b, a
-        palette_data.extend([0.0] * 12)
-    palette = struct.pack(f"<{palette_size*12}f", *palette_data)
+    # PALETTE: component count depends on the splat shape (float32 assumed here).
+    cov = {0: 1, 1: 3, 2: 6}[(flags >> 10) & 0b11]
+    comp = 3 + cov + 2 + 4  # mu_xyz + covariance + mu_t/sigma_t + rgba
+    palette = struct.pack(f"<{palette_size*comp}f", *([0.0] * (palette_size * comp)))
 
     # INDEX: total_voxels * index_bytes
     total_voxels = width * height * depth * frames
@@ -211,7 +209,7 @@ def create_dummy_4splat_data(
 
 
 def test_foursplat_parser_happy_path(tmp_path):
-    data = create_dummy_4splat_data(flags=0x0100)  # index code 1 (2 bytes)
+    data = create_dummy_4splat_data(flags=0x0504)  # f32 + axis-aligned + 2-byte index
     file_path = tmp_path / "test.4spl"
     file_path.write_bytes(data)
 
@@ -327,7 +325,7 @@ def test_palette_viewer(mock_slider, mock_checkbuttons, mock_show, tmp_path):
     # Testing PaletteViewer methods without triggering real matplotlib widget exceptions
     import matplotlib.pyplot as plt
 
-    data = create_dummy_4splat_data(flags=0x0100)
+    data = create_dummy_4splat_data(flags=0x0504)
     file_path = tmp_path / "test.4spl"
     file_path.write_bytes(data)
 

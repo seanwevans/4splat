@@ -20,7 +20,7 @@
 │▒│ name         size        encoding    value      hex                 │▒│
 │▒├─────────────────────────────────────────────────────────────────────┤▒│
 │▒│ magic        4 bytes     ASCII       "4SPL"     0x34 0x53 0x50 0x4C │▒│
-│▒│ version      4 bytes     uint8[4]    {1,0,0,0}  0x01 0x00 0x00 0x00 │▒│
+│▒│ version      4 bytes     uint8[4]    {1,1,0,0}  0x01 0x01 0x00 0x00 │▒│
 │▒│ width        4 bytes     uint32      Width                          │▒│
 │▒│ height       4 bytes     uint32      Height                         │▒│
 │▒│ depth        4 bytes     uint32      Depth                          │▒│
@@ -161,6 +161,31 @@
  │▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
  ╰───────────────────────────────────────────────────────────────────────╯
 ```
+
+## Palette layout (v0.2)
+
+Version `{1,1,0,0}` pins the palette layout, resolving an ambiguity in the
+original diagram. Each entry stores its floats in this field order (all
+little-endian, at the width set by the precision flag):
+
+```
+mu_x, mu_y, mu_z,  <covariance block>,  mu_t, sigma_t,  r, g, b, alpha
+```
+
+The covariance block's size is set by the **splat shape** flag, so the entry
+size varies (the 48-byte entry in the diagram above is the axis-aligned case):
+
+| Shape | Covariance block | Floats | Bytes (float32) |
+| --- | --- | --- | --- |
+| Isotropic (`00`) | `sigma` (one shared spatial σ) | 10 | 40 |
+| Axis-Aligned (`01`) | `sigma_x, sigma_y, sigma_z` | 12 | 48 |
+| Full Covariance (`10`) | `sigma_x, sigma_y, sigma_z, sigma_xy, sigma_xz, sigma_yz` | 15 | 60 |
+
+Full covariance stores the symmetric 3×3 spatial covariance as its diagonal
+followed by the upper-triangle off-diagonals. An isotropic entry expands its one
+σ to all three axes on read. The palette section is therefore
+`paletteSize * entry_bytes`, with `entry_bytes` derived from the shape and
+precision flags.
 
 ## Building
 

@@ -16,9 +16,12 @@ typedef struct {
 } test_case;
 
 static Splat4DHeader make_header(void) {
+  // Axis-aligned so the three distinct spatial sigmas in make_palette() survive
+  // a round trip (the zero-flag default, isotropic, keeps only one).
   return create_splat4DHeader(/*width=*/2, /*height=*/2, /*depth=*/1,
                               /*frames=*/1, /*pSize=*/2,
-                              /*flags=*/SPLAT_FLAG_PRECISION_FLOAT32);
+                              /*flags=*/SPLAT_FLAG_PRECISION_FLOAT32 |
+                                  (SPLAT_SHAPE_AXIS_ALIGNED << SPLAT_FLAG_SPLAT_SHAPE_SHIFT));
 }
 
 static void make_palette(Splat4D palette[2]) {
@@ -80,20 +83,22 @@ static bool test_idxoffset_helpers_agree(void) {
   Splat4DHeader header = make_header();
   uint64_t forward = compute_idxoffset_forward(&header);
   uint64_t reverse = compute_idxoffset_reverse(&header);
-  uint64_t expected =
-      (uint64_t)sizeof(Splat4DHeader) + (uint64_t)header.pSize * (uint64_t)sizeof(Splat4D);
+  uint64_t expected = (uint64_t)sizeof(Splat4DHeader) +
+                      (uint64_t)header.pSize * (uint64_t)palette_entry_disk_bytes(header.flags);
   return forward == reverse && forward == expected;
 }
 
 static bool test_idxoffset_forward_handles_large_palette(void) {
   // A palette large enough that the index offset (header + palette bytes) exceeds
   // 4 GiB must not be truncated when reported as a 64-bit offset.
-  Splat4DHeader header =
-      create_splat4DHeader(/*width=*/1, /*height=*/1, /*depth=*/1, /*frames=*/1,
-                           /*pSize=*/100000000u, /*flags=*/SPLAT_FLAG_PRECISION_FLOAT32);
+  Splat4DHeader header = create_splat4DHeader(
+      /*width=*/1, /*height=*/1, /*depth=*/1, /*frames=*/1,
+      /*pSize=*/100000000u,
+      /*flags=*/SPLAT_FLAG_PRECISION_FLOAT32 |
+          (SPLAT_SHAPE_AXIS_ALIGNED << SPLAT_FLAG_SPLAT_SHAPE_SHIFT));
 
-  uint64_t expected =
-      (uint64_t)sizeof(Splat4DHeader) + (uint64_t)header.pSize * (uint64_t)sizeof(Splat4D);
+  uint64_t expected = (uint64_t)sizeof(Splat4DHeader) +
+                      (uint64_t)header.pSize * (uint64_t)palette_entry_disk_bytes(header.flags);
   uint64_t forward = compute_idxoffset_forward(&header);
 
   return expected > UINT32_MAX && forward == expected;
@@ -109,7 +114,8 @@ static bool test_idxoffset_reverse_handles_large_files(void) {
   uint64_t index_bytes = header_total_indices(&header) * sizeof(uint64_t);
   uint64_t forward = compute_idxoffset_forward(&header);
   uint64_t reverse = compute_idxoffset_reverse(&header);
-  uint64_t expected = (uint64_t)sizeof(Splat4DHeader) + (uint64_t)header.pSize * sizeof(Splat4D);
+  uint64_t expected = (uint64_t)sizeof(Splat4DHeader) +
+                      (uint64_t)header.pSize * (uint64_t)palette_entry_disk_bytes(header.flags);
 
   return index_bytes > UINT32_MAX && expected == forward && reverse == forward;
 }
@@ -761,7 +767,7 @@ static bool test_stream_splat4DVideo_success(void) {
   bool ok = stream_splat4DVideo(&video, 16, mock_stream_consumer, &ctx);
 
   size_t expected_bytes =
-      sizeof(Splat4DHeader) + video.header.pSize * sizeof(Splat4D) +
+      sizeof(Splat4DHeader) + video.header.pSize * palette_entry_disk_bytes(video.header.flags) +
       header_total_indices(&video.header) * 1; // get_index_width_bytes returns 1
 
   return ok && ctx.total_bytes == expected_bytes && ctx.call_count > 1;
@@ -918,7 +924,9 @@ static bool test_round_trip_float64_palette(void) {
   uint64_t indices[4];
   make_palette(palette);
   make_indices(indices);
-  Splat4DHeader header = create_splat4DHeader(2, 2, 1, 1, 2, SPLAT_FLAG_PRECISION_FLOAT64);
+  Splat4DHeader header = create_splat4DHeader(
+      2, 2, 1, 1, 2,
+      SPLAT_FLAG_PRECISION_FLOAT64 | (SPLAT_SHAPE_AXIS_ALIGNED << SPLAT_FLAG_SPLAT_SHAPE_SHIFT));
   Splat4DVideo original = create_splat4DVideo(header, palette, indices);
 
   FILE *fp = tmpfile();
@@ -949,8 +957,10 @@ static bool test_round_trip_float16_palette(void) {
   uint64_t indices[4];
   make_palette(palette);
   make_indices(indices);
-  // float16 is selected explicitly, bypassing the float32 default in sanitize.
-  Splat4DHeader header = create_splat4DHeader(2, 2, 1, 1, 2, 0);
+  // float16 is selected explicitly, bypassing the float32 default in sanitize;
+  // axis-aligned so all three spatial sigmas are stored.
+  Splat4DHeader header =
+      create_splat4DHeader(2, 2, 1, 1, 2, SPLAT_SHAPE_AXIS_ALIGNED << SPLAT_FLAG_SPLAT_SHAPE_SHIFT);
   header.flags = (header.flags & ~SPLAT_FLAG_PRECISION_MASK) | SPLAT_FLAG_PRECISION_FLOAT16;
   Splat4DVideo original = create_splat4DVideo(header, palette, indices);
 
@@ -971,6 +981,7 @@ static bool test_round_trip_float16_palette(void) {
   // float16 storage is lossy: the recovered palette equals the originals passed
   // through the narrowing conversion.
   Splat4D expected[2];
+  memset(expected, 0, sizeof expected); // off-diagonal covariance stays zero
   for (int e = 0; e < 2; ++e) {
     float comps[12];
     memcpy(comps, &palette[e], sizeof comps);
@@ -1190,6 +1201,74 @@ static bool test_image_decode_rejects_non_2d(void) {
   return rejected;
 }
 
+static bool test_palette_entry_disk_bytes_by_shape(void) {
+  uint32_t f32 = SPLAT_FLAG_PRECISION_FLOAT32;
+  return palette_entry_disk_bytes(f32 | (SPLAT_SHAPE_ISOTROPIC << SPLAT_FLAG_SPLAT_SHAPE_SHIFT)) ==
+             40 &&
+         palette_entry_disk_bytes(
+             f32 | (SPLAT_SHAPE_AXIS_ALIGNED << SPLAT_FLAG_SPLAT_SHAPE_SHIFT)) == 48 &&
+         palette_entry_disk_bytes(
+             f32 | (SPLAT_SHAPE_FULL_COVARIANCE << SPLAT_FLAG_SPLAT_SHAPE_SHIFT)) == 60;
+}
+
+// Round-trip a single splat through a file at the given shape.
+static bool round_trip_shape(uint32_t shape, Splat4D in, Splat4D *out) {
+  Splat4D pal[1] = {in};
+  uint64_t idx[1] = {0};
+  Splat4DHeader h = create_splat4DHeader(
+      1, 1, 1, 1, 1, SPLAT_FLAG_PRECISION_FLOAT32 | (shape << SPLAT_FLAG_SPLAT_SHAPE_SHIFT));
+  Splat4DVideo v = create_splat4DVideo(h, pal, idx); // borrows the stack arrays
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  bool ok = write_splat4DVideo(fp, &v);
+  if (ok) {
+    rewind(fp);
+    Splat4DVideo loaded;
+    ok = read_splat4DVideo(fp, &loaded);
+    if (ok) {
+      *out = loaded.palette.palette[0];
+      free_splat4DVideo(&loaded);
+    }
+  }
+  fclose(fp);
+  return ok;
+}
+
+static bool test_shape_isotropic_collapses_sigmas(void) {
+  Splat4D in = create_splat4D(1, 7, 2, 8, 3, 9, 4, 5, 0.1f, 0.2f, 0.3f, 1.0f);
+  Splat4D out;
+  if (!round_trip_shape(SPLAT_SHAPE_ISOTROPIC, in, &out))
+    return false;
+  // One shared sigma (sigma_x = 7) is stored and expands to all three axes.
+  return out.sigma_x == 7.0f && out.sigma_y == 7.0f && out.sigma_z == 7.0f && out.mu_x == 1.0f &&
+         out.mu_y == 2.0f && out.mu_z == 3.0f && out.mu_t == 4.0f && out.sigma_t == 5.0f &&
+         out.r == 0.1f && out.alpha == 1.0f && out.sigma_xy == 0.0f && out.sigma_xz == 0.0f &&
+         out.sigma_yz == 0.0f;
+}
+
+static bool test_shape_axis_aligned_round_trip(void) {
+  Splat4D in = create_splat4D(1, 7, 2, 8, 3, 9, 4, 5, 0.1f, 0.2f, 0.3f, 1.0f);
+  Splat4D out;
+  if (!round_trip_shape(SPLAT_SHAPE_AXIS_ALIGNED, in, &out))
+    return false;
+  return out.sigma_x == 7.0f && out.sigma_y == 8.0f && out.sigma_z == 9.0f &&
+         out.sigma_xy == 0.0f && out.sigma_xz == 0.0f && out.sigma_yz == 0.0f && out.mu_z == 3.0f &&
+         out.b == 0.3f;
+}
+
+static bool test_shape_full_covariance_round_trip(void) {
+  Splat4D in = create_splat4D(1, 7, 2, 8, 3, 9, 4, 5, 0.1f, 0.2f, 0.3f, 1.0f);
+  in.sigma_xy = 0.25f;
+  in.sigma_xz = 0.5f;
+  in.sigma_yz = 0.75f;
+  Splat4D out;
+  if (!round_trip_shape(SPLAT_SHAPE_FULL_COVARIANCE, in, &out))
+    return false;
+  return out.sigma_x == 7.0f && out.sigma_y == 8.0f && out.sigma_z == 9.0f &&
+         out.sigma_xy == 0.25f && out.sigma_xz == 0.5f && out.sigma_yz == 0.75f;
+}
+
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
@@ -1252,6 +1331,10 @@ static test_case TESTS[] = {
     {"image_round_trip", test_image_round_trip},
     {"image_through_file", test_image_through_file},
     {"image_decode_rejects_non_2d", test_image_decode_rejects_non_2d},
+    {"palette_entry_disk_bytes_by_shape", test_palette_entry_disk_bytes_by_shape},
+    {"shape_isotropic_collapses_sigmas", test_shape_isotropic_collapses_sigmas},
+    {"shape_axis_aligned_round_trip", test_shape_axis_aligned_round_trip},
+    {"shape_full_covariance_round_trip", test_shape_full_covariance_round_trip},
     {"half_conversion_exact_values", test_half_conversion_exact_values},
     {"round_trip_float64_palette", test_round_trip_float64_palette},
     {"round_trip_float16_palette", test_round_trip_float16_palette},

@@ -29,8 +29,6 @@ from matplotlib.colors import ListedColormap
 from matplotlib.widgets import CheckButtons, Slider
 
 HEADER_STRUCT = struct.Struct("<4s4B6I")
-PALETTE_ENTRY_FLOATS = 12
-PALETTE_ENTRY_SIZE = PALETTE_ENTRY_FLOATS * 4
 FOOTER_STRUCT = struct.Struct("<QI4s")
 INDEX_WIDTH_LOOKUP = {0: 1, 1: 2, 2: 4, 3: 8}
 
@@ -62,6 +60,28 @@ class FourSplatHeader:
         if code not in INDEX_WIDTH_LOOKUP:
             raise ValueError(f"Unsupported index width code: {code}")
         return INDEX_WIDTH_LOOKUP[code]
+
+    @property
+    def precision_dtype(self) -> str:
+        code = (self.flags >> 2) & 0b11
+        dtypes = {0: "<f2", 1: "<f4", 2: "<f8"}
+        if code not in dtypes:
+            raise ValueError(f"Unsupported precision code: {code}")
+        return dtypes[code]
+
+    @property
+    def cov_count(self) -> int:
+        # Spatial spread values per palette entry, by splat shape.
+        code = (self.flags >> 10) & 0b11
+        counts = {0: 1, 1: 3, 2: 6}
+        if code not in counts:
+            raise ValueError(f"Reserved splat shape: {code}")
+        return counts[code]
+
+    @property
+    def palette_component_count(self) -> int:
+        # mu_{x,y,z} + covariance block + mu_t + sigma_t + r,g,b,alpha
+        return 3 + self.cov_count + 2 + 4
 
 
 @dataclass
@@ -134,9 +154,7 @@ class FourSplatParser:
             raise ValueError("File too small to be a valid 4Splat container")
 
         header = self._parse_header(data)
-        palette, palette_bytes = self._parse_palette(
-            data, HEADER_STRUCT.size, header.palette_size
-        )
+        palette, palette_bytes = self._parse_palette(data, HEADER_STRUCT.size, header)
         indices, idx_bytes = self._parse_indices(
             data,
             HEADER_STRUCT.size + palette_bytes,
@@ -172,36 +190,41 @@ class FourSplatParser:
         )
 
     def _parse_palette(
-        self, data: bytes, offset: int, palette_size: int
+        self, data: bytes, offset: int, header: FourSplatHeader
     ) -> Tuple[List[PaletteEntry], int]:
         entries: List[PaletteEntry] = []
-        total_size = palette_size * PALETTE_ENTRY_SIZE
+        palette_size = header.palette_size
+        dtype = header.precision_dtype
+        comp_count = header.palette_component_count
+        cov = header.cov_count
+        entry_size = comp_count * np.dtype(dtype).itemsize
+        total_size = palette_size * entry_size
         end = offset + total_size
         if len(data) < end:
             raise ValueError("Palette data truncated")
 
         palette_buffer = memoryview(data)[offset:end]
         floats = np.frombuffer(
-            palette_buffer, dtype="<f4", count=palette_size * PALETTE_ENTRY_FLOATS
-        )
-        floats = floats.reshape((palette_size, PALETTE_ENTRY_FLOATS))
+            palette_buffer, dtype=dtype, count=palette_size * comp_count
+        ).astype(np.float32)
+        floats = floats.reshape((palette_size, comp_count))
 
         for row in floats:
+            mu_x, mu_y, mu_z = float(row[0]), float(row[1]), float(row[2])
+            k = 3
+            if cov == 1:  # isotropic: one shared sigma
+                sigma_x = sigma_y = sigma_z = float(row[k])
+                k += 1
+            else:  # axis-aligned or full covariance (diagonal first)
+                sigma_x, sigma_y, sigma_z = float(row[k]), float(row[k + 1]), float(row[k + 2])
+                k += 3
+                if cov == 6:
+                    k += 3  # off-diagonal terms, unused by the viewer
+            mu_t, sigma_t = float(row[k]), float(row[k + 1])
+            k += 2
+            r, g, b, alpha = (float(row[k]), float(row[k + 1]), float(row[k + 2]), float(row[k + 3]))
             entries.append(
-                PaletteEntry(
-                    mu_x=float(row[0]),
-                    mu_y=float(row[1]),
-                    mu_z=float(row[2]),
-                    sigma_x=float(row[3]),
-                    sigma_y=float(row[4]),
-                    sigma_z=float(row[5]),
-                    mu_t=float(row[6]),
-                    sigma_t=float(row[7]),
-                    r=float(row[8]),
-                    g=float(row[9]),
-                    b=float(row[10]),
-                    alpha=float(row[11]),
-                )
+                PaletteEntry(mu_x, mu_y, mu_z, sigma_x, sigma_y, sigma_z, mu_t, sigma_t, r, g, b, alpha)
             )
 
         return entries, total_size
