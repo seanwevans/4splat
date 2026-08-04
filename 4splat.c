@@ -226,8 +226,8 @@ static bool flags_supported(uint32_t flags) {
   }
 
   uint32_t precision = flags & SPLAT_FLAG_PRECISION_MASK;
-  if (precision != SPLAT_FLAG_PRECISION_FLOAT32) {
-    LOG_ERROR("❌ Unsupported precision flag (0x%08X)\n", precision);
+  if (precision == SPLAT_FLAG_PRECISION_FLOAT128) {
+    LOG_ERROR("❌ Unsupported precision (Float128)\n");
     return false;
   }
 
@@ -731,6 +731,147 @@ static uint64_t index_width_max_value(uint8_t idx_width) {
   return ((uint64_t)1 << (8u * idx_width)) - 1u;
 }
 
+// --- palette precision ---
+//
+// A Splat4D is twelve packed IEEE-754 floats in memory. On disk the palette is
+// stored at the precision selected by the header's precision field: float16
+// (2 bytes/component), float32 (4) or float64 (8). float32 is the in-memory
+// representation, so that path is a byte-for-byte copy; float64 widens exactly;
+// float16 is a lossy narrowing.
+_Static_assert(sizeof(Splat4D) == 12 * sizeof(float), "Splat4D must be 12 packed floats");
+
+#define SPLAT_PALETTE_COMPONENTS 12
+
+static uint32_t splat_precision_bits(uint32_t flags) {
+  return (flags & SPLAT_FLAG_PRECISION_MASK) >> SPLAT_FLAG_PRECISION_SHIFT;
+}
+
+static size_t splat_precision_component_bytes(uint32_t flags) {
+  switch (splat_precision_bits(flags)) {
+  case 0:
+    return 2; // Float16
+  case 2:
+    return 8; // Float64
+  default:
+    return 4; // Float32 (the only other value that reaches disk)
+  }
+}
+
+static size_t palette_entry_disk_bytes(uint32_t flags) {
+  return (size_t)SPLAT_PALETTE_COMPONENTS * splat_precision_component_bytes(flags);
+}
+
+// IEEE-754 binary16 <-> binary32 with round-to-nearest-even.
+static uint16_t float_to_half(float value) {
+  uint32_t x;
+  memcpy(&x, &value, sizeof x);
+  uint32_t sign = (x >> 16) & 0x8000u;
+  uint32_t exp = (x >> 23) & 0xFFu;
+  uint32_t mant = x & 0x7FFFFFu;
+
+  if (exp == 0xFF) // Inf / NaN
+    return (uint16_t)(sign | 0x7C00u | (mant ? 0x200u : 0u));
+
+  int32_t e = (int32_t)exp - 127 + 15;
+  if (e >= 0x1F) // overflow -> Inf
+    return (uint16_t)(sign | 0x7C00u);
+
+  if (e <= 0) {
+    if (e < -10) // too small -> signed zero
+      return (uint16_t)sign;
+    mant |= 0x800000u; // restore implicit leading bit
+    uint32_t shift = (uint32_t)(14 - e);
+    uint32_t half_mant = mant >> shift;
+    uint32_t remainder = mant & ((1u << shift) - 1u);
+    uint32_t halfway = 1u << (shift - 1);
+    if (remainder > halfway || (remainder == halfway && (half_mant & 1u)))
+      half_mant++;
+    return (uint16_t)(sign | half_mant);
+  }
+
+  uint16_t half = (uint16_t)(sign | ((uint32_t)e << 10) | (mant >> 13));
+  uint32_t remainder = mant & 0x1FFFu;
+  if (remainder > 0x1000u || (remainder == 0x1000u && (half & 1u)))
+    half++; // carry propagates into the exponent correctly
+  return half;
+}
+
+static float half_to_float(uint16_t h) {
+  uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+  uint32_t exp = (h >> 10) & 0x1Fu;
+  uint32_t mant = h & 0x3FFu;
+  uint32_t f;
+
+  if (exp == 0) {
+    if (mant == 0) {
+      f = sign;
+    } else {
+      exp = 127 - 15 + 1;
+      while (!(mant & 0x400u)) {
+        mant <<= 1;
+        exp--;
+      }
+      mant &= 0x3FFu;
+      f = sign | (exp << 23) | (mant << 13);
+    }
+  } else if (exp == 0x1F) {
+    f = sign | 0x7F800000u | (mant << 13);
+  } else {
+    exp = exp - 15 + 127;
+    f = sign | (exp << 23) | (mant << 13);
+  }
+
+  float out;
+  memcpy(&out, &f, sizeof out);
+  return out;
+}
+
+static void serialize_palette_entry(const Splat4D *s, uint32_t flags, uint8_t *out) {
+  float comps[SPLAT_PALETTE_COMPONENTS];
+  memcpy(comps, s, sizeof comps);
+  switch (splat_precision_bits(flags)) {
+  case 0: // Float16
+    for (int i = 0; i < SPLAT_PALETTE_COMPONENTS; ++i) {
+      uint16_t h = float_to_half(comps[i]);
+      memcpy(out + (size_t)i * 2, &h, 2);
+    }
+    break;
+  case 2: // Float64
+    for (int i = 0; i < SPLAT_PALETTE_COMPONENTS; ++i) {
+      double d = (double)comps[i];
+      memcpy(out + (size_t)i * 8, &d, 8);
+    }
+    break;
+  default: // Float32
+    memcpy(out, comps, sizeof comps);
+    break;
+  }
+}
+
+static void deserialize_palette_entry(const uint8_t *in, uint32_t flags, Splat4D *s) {
+  float comps[SPLAT_PALETTE_COMPONENTS];
+  switch (splat_precision_bits(flags)) {
+  case 0: // Float16
+    for (int i = 0; i < SPLAT_PALETTE_COMPONENTS; ++i) {
+      uint16_t h;
+      memcpy(&h, in + (size_t)i * 2, 2);
+      comps[i] = half_to_float(h);
+    }
+    break;
+  case 2: // Float64
+    for (int i = 0; i < SPLAT_PALETTE_COMPONENTS; ++i) {
+      double d;
+      memcpy(&d, in + (size_t)i * 8, 8);
+      comps[i] = (float)d;
+    }
+    break;
+  default: // Float32
+    memcpy(comps, in, sizeof comps);
+    break;
+  }
+  memcpy(s, comps, sizeof comps);
+}
+
 typedef enum {
   SPLAT_INDEX_OK = 0,
   SPLAT_INDEX_OUT_OF_RANGE = 1, // references a palette slot that does not exist
@@ -770,8 +911,9 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
   if (!splat4d_stream_block((const uint8_t *)&v->header, sizeof v->header, chunk, fn, ctx))
     return false;
 
+  size_t entry_bytes = palette_entry_disk_bytes(v->header.flags);
   uint64_t palette_bytes_u64;
-  if (!checked_mul_u64((uint64_t)v->header.pSize, sizeof(Splat4D), &palette_bytes_u64))
+  if (!checked_mul_u64((uint64_t)v->header.pSize, entry_bytes, &palette_bytes_u64))
     return false;
   if (palette_bytes_u64 > SIZE_MAX)
     return false;
@@ -780,8 +922,23 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
   if (palette_bytes > 0) {
     if (!v->palette.palette)
       return false;
-    if (!splat4d_stream_block((const uint8_t *)v->palette.palette, palette_bytes, chunk, fn, ctx))
-      return false;
+    if (splat_precision_bits(v->header.flags) == 1) {
+      // Float32 is the in-memory layout: stream the palette verbatim.
+      if (!splat4d_stream_block((const uint8_t *)v->palette.palette, palette_bytes, chunk, fn, ctx))
+        return false;
+    } else {
+      // Serialize each entry to the on-disk precision, then stream the buffer.
+      uint8_t *packed = malloc(palette_bytes);
+      if (!packed)
+        return false;
+      for (uint32_t i = 0; i < v->header.pSize; ++i)
+        serialize_palette_entry(&v->palette.palette[i], v->header.flags,
+                                packed + (size_t)i * entry_bytes);
+      bool ok = splat4d_stream_block(packed, palette_bytes, chunk, fn, ctx);
+      free(packed);
+      if (!ok)
+        return false;
+    }
   }
 
   uint64_t total = header_total_indices(&v->header);
@@ -881,13 +1038,14 @@ uint32_t compute_video_checksum(const Splat4DVideo *v) {
 }
 
 uint64_t compute_idxoffset_forward(const Splat4DHeader *h) {
-  return (uint64_t)sizeof(Splat4DHeader) + (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
+  return (uint64_t)sizeof(Splat4DHeader) +
+         (uint64_t)h->pSize * (uint64_t)palette_entry_disk_bytes(h->flags);
 }
 
 uint64_t compute_idxoffset_reverse(const Splat4DHeader *h) {
   uint64_t total = header_total_indices(h);
   uint64_t header_bytes = sizeof(Splat4DHeader);
-  uint64_t palette_bytes = (uint64_t)h->pSize * sizeof(Splat4D);
+  uint64_t palette_bytes = (uint64_t)h->pSize * (uint64_t)palette_entry_disk_bytes(h->flags);
   uint8_t idx_width = get_index_width_bytes(h->flags);
   uint64_t index_bytes = total * idx_width;
   uint64_t footer_bytes = sizeof(Splat4DFooter);
@@ -898,15 +1056,15 @@ uint64_t compute_idxoffset_reverse(const Splat4DHeader *h) {
 
 bool sanity_check_idxoffset_file(FILE *fp, const Splat4DHeader *h, const Splat4DFooter *f) {
   (void)fp;
-  uint64_t expect =
-      (uint64_t)sizeof(Splat4DHeader) + (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
+  uint64_t expect = (uint64_t)sizeof(Splat4DHeader) +
+                    (uint64_t)h->pSize * (uint64_t)palette_entry_disk_bytes(h->flags);
   return f->idxoffset == expect;
 }
 
 bool check_idxoffset_file(FILE *fp, const Splat4DHeader *h, const Splat4DFooter *f) {
   (void)fp;
-  uint64_t after_header =
-      (uint64_t)sizeof(Splat4DHeader) + (uint64_t)h->pSize * (uint64_t)sizeof(Splat4D);
+  uint64_t after_header = (uint64_t)sizeof(Splat4DHeader) +
+                          (uint64_t)h->pSize * (uint64_t)palette_entry_disk_bytes(h->flags);
   return after_header == (uint64_t)f->idxoffset;
 }
 
@@ -1131,27 +1289,73 @@ void print_splat4DPalette(const Splat4DVideo *v) {
     print_splat4D(&v->palette.palette[i], i);
 }
 
-bool write_splat4DPalette(FILE *fp, const Splat4DPalette *p, uint32_t count) {
+bool write_splat4DPalette(FILE *fp, const Splat4DPalette *p, uint32_t count, uint32_t flags) {
   if (!fp || !p || !p->palette || count == 0)
     return false;
-  return fwrite(p->palette, sizeof(Splat4D), count, fp) == count;
+
+  if (splat_precision_bits(flags) == 1) // Float32: verbatim
+    return fwrite(p->palette, sizeof(Splat4D), count, fp) == count;
+
+  size_t entry_bytes = palette_entry_disk_bytes(flags);
+  uint64_t bytes64 = 0;
+  if (!checked_mul_u64((uint64_t)count, (uint64_t)entry_bytes, &bytes64) || bytes64 > SIZE_MAX)
+    return false;
+  uint8_t *packed = malloc((size_t)bytes64);
+  if (!packed)
+    return false;
+  for (uint32_t i = 0; i < count; ++i)
+    serialize_palette_entry(&p->palette[i], flags, packed + (size_t)i * entry_bytes);
+  bool ok = fwrite(packed, 1, (size_t)bytes64, fp) == (size_t)bytes64;
+  free(packed);
+  return ok;
 }
 
-bool read_splat4DPalette(FILE *fp, Splat4DPalette *p, uint32_t count) {
+bool read_splat4DPalette(FILE *fp, Splat4DPalette *p, uint32_t count, uint32_t flags) {
   if (!fp || !p || count == 0)
     return false;
-  uint64_t bytes64 = 0;
-  if (!checked_mul_u64((uint64_t)count, (uint64_t)sizeof(Splat4D), &bytes64) || bytes64 > SIZE_MAX)
+
+  // The in-memory palette is always full-precision Splat4D; the on-disk entries
+  // may be narrower, so allocate for the former and read/convert the latter.
+  uint64_t mem_bytes = 0;
+  if (!checked_mul_u64((uint64_t)count, (uint64_t)sizeof(Splat4D), &mem_bytes) ||
+      mem_bytes > SIZE_MAX)
     return false;
-  size_t bytes = (size_t)bytes64;
-  p->palette = malloc(bytes);
+  p->palette = malloc((size_t)mem_bytes);
   if (!p->palette)
     return false;
-  if (fread(p->palette, sizeof(Splat4D), count, fp) != count) {
+
+  if (splat_precision_bits(flags) == 1) { // Float32: verbatim
+    if (fread(p->palette, sizeof(Splat4D), count, fp) != count) {
+      free(p->palette);
+      p->palette = NULL;
+      return false;
+    }
+    return true;
+  }
+
+  size_t entry_bytes = palette_entry_disk_bytes(flags);
+  uint64_t disk_bytes = 0;
+  if (!checked_mul_u64((uint64_t)count, (uint64_t)entry_bytes, &disk_bytes) ||
+      disk_bytes > SIZE_MAX) {
     free(p->palette);
     p->palette = NULL;
     return false;
   }
+  uint8_t *packed = malloc((size_t)disk_bytes);
+  if (!packed) {
+    free(p->palette);
+    p->palette = NULL;
+    return false;
+  }
+  if (fread(packed, 1, (size_t)disk_bytes, fp) != (size_t)disk_bytes) {
+    free(packed);
+    free(p->palette);
+    p->palette = NULL;
+    return false;
+  }
+  for (uint32_t i = 0; i < count; ++i)
+    deserialize_palette_entry(packed + (size_t)i * entry_bytes, flags, &p->palette[i]);
+  free(packed);
   return true;
 }
 
@@ -1274,7 +1478,8 @@ bool read_splat4DIndex(FILE *fp, Splat4DIndex *i, uint64_t total, uint32_t flags
 Splat4DFooter create_splat4DFooter(const Splat4DHeader *h) {
   return (Splat4DFooter){
       .checksum = 0,
-      .idxoffset = sizeof(Splat4DHeader) + h->pSize * sizeof(Splat4D),
+      .idxoffset = (uint64_t)sizeof(Splat4DHeader) +
+                   (uint64_t)h->pSize * (uint64_t)palette_entry_disk_bytes(h->flags),
       .end = 0x4C505334 // "LPS4"
   };
 }
@@ -1323,7 +1528,9 @@ bool write_splat4DVideo(FILE *fp, Splat4DVideo *v) {
     return false;
 
   // Compute header-derived values
-  v->footer.idxoffset = sizeof(Splat4DHeader) + v->header.pSize * sizeof(Splat4D);
+  v->footer.idxoffset =
+      (uint64_t)sizeof(Splat4DHeader) +
+      (uint64_t)v->header.pSize * (uint64_t)palette_entry_disk_bytes(v->header.flags);
 
   crc32_t c;
   crc32_init(&c);
@@ -1367,7 +1574,8 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   }
 
   uint64_t palette_bytes = 0;
-  if (!checked_mul_u64((uint64_t)v->header.pSize, (uint64_t)sizeof(Splat4D), &palette_bytes) ||
+  if (!checked_mul_u64((uint64_t)v->header.pSize,
+                       (uint64_t)palette_entry_disk_bytes(v->header.flags), &palette_bytes) ||
       palette_bytes > SIZE_MAX) {
     LOG_ERROR("❌ Invalid palette size\n");
     return false;
@@ -1386,7 +1594,7 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   }
 
   // Read palette
-  if (!read_splat4DPalette(fp, &v->palette, v->header.pSize))
+  if (!read_splat4DPalette(fp, &v->palette, v->header.pSize, v->header.flags))
     return false;
 
   // Read index
@@ -1422,7 +1630,7 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
     LOG_ERROR("❌ Index offset mismatch (footer=%" PRIu64 ", expect=%" PRIu64 ")\n",
               (uint64_t)v->footer.idxoffset,
               (uint64_t)sizeof(Splat4DHeader) +
-                  (uint64_t)v->header.pSize * (uint64_t)sizeof(Splat4D));
+                  (uint64_t)v->header.pSize * (uint64_t)palette_entry_disk_bytes(v->header.flags));
     // free allocations before returning
     free(v->palette.palette);
     free(v->index.index);
