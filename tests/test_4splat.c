@@ -1423,6 +1423,48 @@ static bool test_golden_vector_reads_back(void) {
   return ok;
 }
 
+static bool test_quantize_reduces_palette(void) {
+  // Four distinct grays quantized down to two representatives.
+  uint8_t rgb[12] = {0, 0, 0, 80, 80, 80, 160, 160, 160, 255, 255, 255};
+  const uint8_t *fr[1] = {rgb};
+  Splat4DVideo v;
+  if (!frames_to_video_quantized(fr, 1, 4, 1, 2, &v))
+    return false;
+  bool ok = v.header.pSize >= 1 && v.header.pSize <= 2;
+  uint8_t **rec = NULL;
+  uint32_t nf = 0, w = 0, h = 0;
+  if (ok)
+    ok = video_to_frames(&v, &rec, &nf, &w, &h) && nf == 1 && w == 4 && h == 1;
+  if (rec) {
+    for (uint32_t t = 0; t < nf; ++t)
+      free(rec[t]);
+    free(rec);
+  }
+  free_splat4DVideo(&v);
+  return ok;
+}
+
+static bool test_quantize_passthrough_within_budget(void) {
+  // A budget >= the distinct-color count keeps the palette exact (lossless).
+  uint8_t rgb[12] = {0, 0, 0, 80, 80, 80, 160, 160, 160, 255, 255, 255};
+  const uint8_t *fr[1] = {rgb};
+  Splat4DVideo v;
+  if (!frames_to_video_quantized(fr, 1, 4, 1, 100, &v))
+    return false;
+  bool ok = v.header.pSize == 4;
+  uint8_t **rec = NULL;
+  uint32_t nf = 0, w = 0, h = 0;
+  if (ok)
+    ok = video_to_frames(&v, &rec, &nf, &w, &h) && nf == 1 && memcmp(rec[0], rgb, 12) == 0;
+  if (rec) {
+    for (uint32_t t = 0; t < nf; ++t)
+      free(rec[t]);
+    free(rec);
+  }
+  free_splat4DVideo(&v);
+  return ok;
+}
+
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
@@ -1488,6 +1530,8 @@ static test_case TESTS[] = {
     {"video_round_trip_shared_palette", test_video_round_trip_shared_palette},
     {"video_through_file", test_video_through_file},
     {"image_is_single_frame_video", test_image_is_single_frame_video},
+    {"quantize_reduces_palette", test_quantize_reduces_palette},
+    {"quantize_passthrough_within_budget", test_quantize_passthrough_within_budget},
     {"golden_conformance_vector", test_golden_conformance_vector},
     {"golden_vector_reads_back", test_golden_vector_reads_back},
     {"palette_entry_disk_bytes_by_shape", test_palette_entry_disk_bytes_by_shape},

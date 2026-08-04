@@ -2658,15 +2658,130 @@ static void colormap_put(ColorMap *m, uint32_t color, uint32_t value) {
   m->val[h] = value;
 }
 
+// --- median-cut color quantization -----------------------------------------
+//
+// Reduce `nu` distinct colors (with pixel-count weights) to at most max_colors
+// representative colors. Fills quant_of[u] with the representative index for
+// each input color and rep_colors[j] with each representative's packed RGB;
+// returns the number of representatives, or 0 on allocation failure.
+
+static const uint32_t *g_mc_colors; // sort context (single-threaded CLI/codec)
+static int g_mc_shift;
+
+static int mc_channel_cmp(const void *a, const void *b) {
+  int va = (int)((g_mc_colors[*(const uint32_t *)a] >> g_mc_shift) & 0xFF);
+  int vb = (int)((g_mc_colors[*(const uint32_t *)b] >> g_mc_shift) & 0xFF);
+  return va - vb;
+}
+
+static uint32_t splat_median_cut(const uint32_t *colors, const double *counts, uint32_t nu,
+                                 uint32_t max_colors, uint32_t *quant_of, uint32_t *rep_colors) {
+  uint32_t *order = malloc((size_t)nu * sizeof(uint32_t));
+  uint32_t *bstart = malloc((size_t)max_colors * sizeof(uint32_t));
+  uint32_t *bend = malloc((size_t)max_colors * sizeof(uint32_t));
+  if (!order || !bstart || !bend) {
+    free(order);
+    free(bstart);
+    free(bend);
+    return 0;
+  }
+  for (uint32_t i = 0; i < nu; ++i)
+    order[i] = i;
+
+  bstart[0] = 0;
+  bend[0] = nu;
+  uint32_t nboxes = 1;
+
+  while (nboxes < max_colors) {
+    // Pick the splittable box with the widest single-channel range.
+    int best = -1;
+    uint32_t best_range = 0, best_shift = 16;
+    for (uint32_t b = 0; b < nboxes; ++b) {
+      if (bend[b] - bstart[b] < 2)
+        continue;
+      int lo[3] = {255, 255, 255}, hi[3] = {0, 0, 0};
+      for (uint32_t k = bstart[b]; k < bend[b]; ++k) {
+        uint32_t c = colors[order[k]];
+        int ch[3] = {(int)((c >> 16) & 0xFF), (int)((c >> 8) & 0xFF), (int)(c & 0xFF)};
+        for (int d = 0; d < 3; ++d) {
+          if (ch[d] < lo[d])
+            lo[d] = ch[d];
+          if (ch[d] > hi[d])
+            hi[d] = ch[d];
+        }
+      }
+      for (int d = 0; d < 3; ++d) {
+        uint32_t range = (uint32_t)(hi[d] - lo[d]);
+        if (best < 0 || range > best_range) {
+          best_range = range;
+          best = (int)b;
+          best_shift = (uint32_t)(16 - 8 * d);
+        }
+      }
+    }
+    if (best < 0 || best_range == 0)
+      break; // nothing left to split
+
+    uint32_t s = bstart[best], e = bend[best];
+    g_mc_colors = colors;
+    g_mc_shift = (int)best_shift;
+    qsort(order + s, e - s, sizeof(uint32_t), mc_channel_cmp);
+
+    double total = 0.0;
+    for (uint32_t k = s; k < e; ++k)
+      total += counts[order[k]];
+    double half = total / 2.0, acc = 0.0;
+    uint32_t m = s + 1;
+    for (uint32_t k = s; k < e; ++k) {
+      acc += counts[order[k]];
+      if (acc >= half) {
+        m = k + 1;
+        break;
+      }
+    }
+    if (m <= s)
+      m = s + 1;
+    if (m >= e)
+      m = e - 1;
+
+    bend[best] = m;
+    bstart[nboxes] = m;
+    bend[nboxes] = e;
+    nboxes++;
+  }
+
+  for (uint32_t b = 0; b < nboxes; ++b) {
+    double sr = 0, sg = 0, sb = 0, sc = 0;
+    for (uint32_t k = bstart[b]; k < bend[b]; ++k) {
+      uint32_t c = colors[order[k]];
+      double wgt = counts[order[k]];
+      sr += wgt * ((c >> 16) & 0xFF);
+      sg += wgt * ((c >> 8) & 0xFF);
+      sb += wgt * (c & 0xFF);
+      sc += wgt;
+      quant_of[order[k]] = b;
+    }
+    uint32_t r = (uint32_t)(sr / sc + 0.5), gg = (uint32_t)(sg / sc + 0.5),
+             bb = (uint32_t)(sb / sc + 0.5);
+    rep_colors[b] = (r << 16) | (gg << 8) | bb;
+  }
+
+  free(order);
+  free(bstart);
+  free(bend);
+  return nboxes;
+}
+
 // Build a video from `nframes` tightly packed w*h RGB8 frames that share one
 // global palette (the format's core model; a single image is just nframes == 1,
-// collapsing to a pseudo-GIF). Each distinct color across all frames becomes a
-// splat whose spatial mu/sigma come from the (x, y) spread of the pixels using
-// it and whose temporal mu_t/sigma_t come from the frame indices. Indices are
-// stored t-major then row-major within a frame. On success *out owns freshly
-// allocated palette/index (free via free_splat4DVideo).
-bool frames_to_video(const uint8_t *const *frames, uint32_t nframes, uint32_t w, uint32_t h,
-                     Splat4DVideo *out) {
+// collapsing to a pseudo-GIF). Each palette color becomes a splat whose spatial
+// mu/sigma come from the (x, y) spread of the pixels using it and whose temporal
+// mu_t/sigma_t come from the frame indices; indices are stored t-major then
+// row-major within a frame. With max_colors == 0 the palette is exact
+// (lossless); a positive max_colors quantizes to at most that many colors via
+// median cut (lossy). On success *out owns freshly allocated palette/index.
+bool frames_to_video_quantized(const uint8_t *const *frames, uint32_t nframes, uint32_t w,
+                               uint32_t h, uint32_t max_colors, Splat4DVideo *out) {
   if (!frames || !out || nframes == 0 || w == 0 || h == 0)
     return false;
   for (uint32_t t = 0; t < nframes; ++t)
@@ -2689,7 +2804,9 @@ bool frames_to_video(const uint8_t *const *frames, uint32_t nframes, uint32_t w,
     return false;
   }
 
+  // Pass 1: distinct colors, their pixel counts, and each pixel's color index.
   uint32_t *colors = NULL;
+  double *counts = NULL;
   size_t pal_cap = 0, pal_n = 0;
   bool ok = true;
 
@@ -2700,44 +2817,87 @@ bool frames_to_video(const uint8_t *const *frames, uint32_t nframes, uint32_t w,
           ((uint32_t)rgb[i * 3] << 16) | ((uint32_t)rgb[i * 3 + 1] << 8) | (uint32_t)rgb[i * 3 + 2];
       uint32_t idx;
       if (!colormap_get(&map, color, &idx)) {
-        if (pal_n == UINT32_MAX) { // palette index must stay in uint32
+        if (pal_n == UINT32_MAX) {
           ok = false;
           break;
         }
         if (pal_n == pal_cap) {
           size_t new_cap = pal_cap ? pal_cap * 2 : 256;
-          uint32_t *grown = realloc(colors, new_cap * sizeof(uint32_t));
-          if (!grown) {
+          uint32_t *gc = realloc(colors, new_cap * sizeof(uint32_t));
+          double *gn = realloc(counts, new_cap * sizeof(double));
+          if (!gc || !gn) {
+            free(gc ? gc : colors);
+            free(gn ? gn : counts);
+            colors = NULL;
+            counts = NULL;
             ok = false;
             break;
           }
-          colors = grown;
+          colors = gc;
+          counts = gn;
           pal_cap = new_cap;
         }
         idx = (uint32_t)pal_n;
-        colors[pal_n++] = color;
+        colors[pal_n] = color;
+        counts[pal_n] = 0.0;
+        pal_n++;
         colormap_put(&map, color, idx);
       }
-      index[(uint64_t)t * npix + i] = idx; // t-major, row-major within a frame
+      counts[idx] += 1.0;
+      index[(uint64_t)t * npix + i] = idx;
     }
   }
   colormap_free(&map);
 
   if (!ok || pal_n == 0) {
     free(colors);
+    free(counts);
     free(index);
     return false;
   }
 
-  // Accumulate spatial and temporal mean/variance per palette entry.
-  double *cnt = calloc(pal_n, sizeof(double));
-  double *sx = calloc(pal_n, sizeof(double));
-  double *sy = calloc(pal_n, sizeof(double));
-  double *sxx = calloc(pal_n, sizeof(double));
-  double *syy = calloc(pal_n, sizeof(double));
-  double *st = calloc(pal_n, sizeof(double));
-  double *stt = calloc(pal_n, sizeof(double));
-  Splat4D *palette = malloc(pal_n * sizeof(Splat4D));
+  // Decide the final palette: exact, or median-cut down to max_colors.
+  uint32_t *quant_of = NULL;
+  uint32_t *rep = NULL;
+  uint32_t final_n;
+  if (max_colors == 0 || (uint64_t)max_colors >= pal_n) {
+    final_n = (uint32_t)pal_n; // already <= max_colors, keep exact colors
+    rep = colors;              // representatives are the colors themselves
+  } else {
+    quant_of = malloc(pal_n * sizeof(uint32_t));
+    rep = malloc((size_t)max_colors * sizeof(uint32_t));
+    if (!quant_of || !rep) {
+      free(quant_of);
+      free(rep);
+      free(colors);
+      free(counts);
+      free(index);
+      return false;
+    }
+    final_n = splat_median_cut(colors, counts, (uint32_t)pal_n, max_colors, quant_of, rep);
+    if (final_n == 0) {
+      free(quant_of);
+      free(rep);
+      free(colors);
+      free(counts);
+      free(index);
+      return false;
+    }
+    // Remap each pixel from its exact color index to the representative index.
+    for (uint64_t k = 0; k < total; ++k)
+      index[k] = quant_of[index[k]];
+  }
+  free(counts);
+
+  // Accumulate spatial/temporal statistics per final palette entry.
+  double *cnt = calloc(final_n, sizeof(double));
+  double *sx = calloc(final_n, sizeof(double));
+  double *sy = calloc(final_n, sizeof(double));
+  double *sxx = calloc(final_n, sizeof(double));
+  double *syy = calloc(final_n, sizeof(double));
+  double *st = calloc(final_n, sizeof(double));
+  double *stt = calloc(final_n, sizeof(double));
+  Splat4D *palette = malloc((size_t)final_n * sizeof(Splat4D));
   if (!cnt || !sx || !sy || !sxx || !syy || !st || !stt || !palette) {
     free(cnt);
     free(sx);
@@ -2747,6 +2907,10 @@ bool frames_to_video(const uint8_t *const *frames, uint32_t nframes, uint32_t w,
     free(st);
     free(stt);
     free(palette);
+    if (quant_of) {
+      free(rep);
+      free(quant_of);
+    }
     free(colors);
     free(index);
     return false;
@@ -2766,13 +2930,13 @@ bool frames_to_video(const uint8_t *const *frames, uint32_t nframes, uint32_t w,
     }
   }
 
-  for (size_t j = 0; j < pal_n; ++j) {
-    double n = cnt[j];
+  for (uint32_t j = 0; j < final_n; ++j) {
+    double n = cnt[j] > 0 ? cnt[j] : 1.0;
     double mx = sx[j] / n, my = sy[j] / n, mt = st[j] / n;
     double vx = sxx[j] / n - mx * mx;
     double vy = syy[j] / n - my * my;
     double vt = stt[j] / n - mt * mt;
-    uint32_t c = colors[j];
+    uint32_t c = rep[j];
     palette[j] =
         create_splat4D((float)mx, (float)splat_sqrt(vx), (float)my, (float)splat_sqrt(vy), 0.0f,
                        0.0f, (float)mt, (float)splat_sqrt(vt), (float)((c >> 16) & 0xFF) / 255.0f,
@@ -2786,17 +2950,26 @@ bool frames_to_video(const uint8_t *const *frames, uint32_t nframes, uint32_t w,
   free(syy);
   free(st);
   free(stt);
+  if (quant_of) {
+    free(rep);
+    free(quant_of);
+  }
   free(colors);
 
-  uint32_t iw = (pal_n <= 256)     ? SPLAT_INDEX_WIDTH_8
-                : (pal_n <= 65536) ? SPLAT_INDEX_WIDTH_16
-                                   : SPLAT_INDEX_WIDTH_32;
-  // Axis-aligned: each splat keeps its independent x and y spatial spread.
+  uint32_t iw = (final_n <= 256)     ? SPLAT_INDEX_WIDTH_8
+                : (final_n <= 65536) ? SPLAT_INDEX_WIDTH_16
+                                     : SPLAT_INDEX_WIDTH_32;
   uint32_t flags = SPLAT_FLAG_PRECISION_FLOAT32 | (iw << SPLAT_FLAG_INDEX_WIDTH_SHIFT) |
                    (SPLAT_SHAPE_AXIS_ALIGNED << SPLAT_FLAG_SPLAT_SHAPE_SHIFT);
-  Splat4DHeader header = create_splat4DHeader(w, h, 1, nframes, (uint32_t)pal_n, flags);
+  Splat4DHeader header = create_splat4DHeader(w, h, 1, nframes, final_n, flags);
   *out = create_splat4DVideo(header, palette, index);
   return true;
+}
+
+// Lossless: one palette entry per distinct color across all frames.
+bool frames_to_video(const uint8_t *const *frames, uint32_t nframes, uint32_t w, uint32_t h,
+                     Splat4DVideo *out) {
+  return frames_to_video_quantized(frames, nframes, w, h, 0, out);
 }
 
 // A single image is the pseudo-GIF collapse of the video codec: one frame.
@@ -2935,21 +3108,20 @@ typedef struct {
 } EncodeOptions;
 
 static void print_usage(FILE *stream) {
-  fprintf(
-      stream,
-      "Usage:\n"
-      "  4splat encode --palette <palette.bin> --index <index.bin> --output <file.4spl> "
-      "--width <w> --height <h> --depth <d> --frames <f> [--palette-size <n>] [--flags <n>]\n"
-      "      [--precision float16|float32|float64] [--compression <scheme>] "
-      "[--index-width 1|2|4|8]\n"
-      "      [--splat-shape <shape>] [--color-space <space>] [--interpolation <mode>] "
-      "[--sorted] [--metadata <0-255>]\n"
-      "  4splat decode --input <file.4spl> [--palette <palette.bin>] [--index <index.bin>] "
-      "[--output <file.4spl>] [--to-color <space>] [--print] [--validate]\n"
-      "  4splat encode-image <in.ppm> <out.4spl> [compression]   (lossless P6 PPM encode)\n"
-      "  4splat decode-image <in.4spl> <out.ppm>\n"
-      "  4splat encode-video [--compress <scheme>] <out.4spl> <frame.ppm>...  (shared palette)\n"
-      "  4splat decode-video <in.4spl> <out-prefix>   (writes <prefix>NNNN.ppm)\n");
+  fprintf(stream,
+          "Usage:\n"
+          "  4splat encode --palette <palette.bin> --index <index.bin> --output <file.4spl> "
+          "--width <w> --height <h> --depth <d> --frames <f> [--palette-size <n>] [--flags <n>]\n"
+          "      [--precision float16|float32|float64] [--compression <scheme>] "
+          "[--index-width 1|2|4|8]\n"
+          "      [--splat-shape <shape>] [--color-space <space>] [--interpolation <mode>] "
+          "[--sorted] [--metadata <0-255>]\n"
+          "  4splat decode --input <file.4spl> [--palette <palette.bin>] [--index <index.bin>] "
+          "[--output <file.4spl>] [--to-color <space>] [--print] [--validate]\n"
+          "  4splat encode-image [--compress <scheme>] [--colors <N>] <in.ppm> <out.4spl>\n"
+          "  4splat decode-image <in.4spl> <out.ppm>\n"
+          "  4splat encode-video [--compress <scheme>] [--colors <N>] <out.4spl> <frame.ppm>...\n"
+          "  4splat decode-video <in.4spl> <out-prefix>   (writes <prefix>NNNN.ppm)\n");
 }
 
 // Parse a color-space name (as used on the command line) into its flag value.
@@ -3603,31 +3775,59 @@ static bool write_ppm(const char *path, const uint8_t *rgb, uint32_t w, uint32_t
   return ok;
 }
 
+// Parse leading --compress <scheme> / --colors <N> options for the image and
+// video encoders. Sets *codec and *max_colors and returns the index of the
+// first positional argument, or -1 on error.
+static int parse_encode_options(int argc, char **argv, uint32_t *codec, uint32_t *max_colors) {
+  *codec = SPLAT_COMPRESSION_NONE;
+  *max_colors = 0;
+  int i = 0;
+  while (i < argc && argv[i][0] == '-' && argv[i][1] == '-') {
+    if (strcmp(argv[i], "--compress") == 0 && i + 1 < argc) {
+      if (!parse_compression_name(argv[i + 1], codec)) {
+        LOG_ERROR("❌ Unknown compression scheme '%s'\n", argv[i + 1]);
+        return -1;
+      }
+      if (!splat_compression_available(*codec)) {
+        LOG_ERROR("❌ Compression scheme not available in this build: %s\n",
+                  splat_compression_display_name(*codec));
+        return -1;
+      }
+      i += 2;
+    } else if (strcmp(argv[i], "--colors") == 0 && i + 1 < argc) {
+      if (!parse_u32(argv[i + 1], max_colors) || *max_colors == 0) {
+        LOG_ERROR("❌ Invalid --colors value '%s' (positive integer)\n", argv[i + 1]);
+        return -1;
+      }
+      i += 2;
+    } else {
+      LOG_ERROR("❌ Unknown or incomplete option '%s'\n", argv[i]);
+      return -1;
+    }
+  }
+  return i;
+}
+
 static int command_encode_image(int argc, char **argv) {
-  if (argc != 2 && argc != 3) {
-    LOG_ERROR("❌ Usage: 4splat encode-image <in.ppm> <out.4spl> [compression]\n");
+  uint32_t codec = 0, max_colors = 0;
+  int p = parse_encode_options(argc, argv, &codec, &max_colors);
+  if (p < 0)
+    return EXIT_FAILURE;
+  if (argc - p != 2) {
+    LOG_ERROR("❌ Usage: 4splat encode-image [--compress <scheme>] [--colors <N>] "
+              "<in.ppm> <out.4spl>\n");
     return EXIT_FAILURE;
   }
-  uint32_t codec = SPLAT_COMPRESSION_NONE;
-  if (argc == 3) {
-    if (!parse_compression_name(argv[2], &codec)) {
-      LOG_ERROR("❌ Unknown compression scheme '%s'\n", argv[2]);
-      return EXIT_FAILURE;
-    }
-    if (!splat_compression_available(codec)) {
-      LOG_ERROR("❌ Compression scheme not available in this build: %s\n",
-                splat_compression_display_name(codec));
-      return EXIT_FAILURE;
-    }
-  }
+  const char *in_path = argv[p], *out_path = argv[p + 1];
 
   uint32_t w = 0, h = 0;
-  uint8_t *rgb = read_ppm(argv[0], &w, &h);
+  uint8_t *rgb = read_ppm(in_path, &w, &h);
   if (!rgb)
     return EXIT_FAILURE;
 
   Splat4DVideo video;
-  bool built = image_to_video(rgb, w, h, &video);
+  const uint8_t *one_frame = rgb;
+  bool built = frames_to_video_quantized(&one_frame, 1, w, h, max_colors, &video);
   free(rgb);
   if (!built) {
     LOG_ERROR("❌ Failed to build 4Splat video from image\n");
@@ -3637,15 +3837,15 @@ static int command_encode_image(int argc, char **argv) {
     set_flag_field(&video.header.flags, SPLAT_FLAG_COMPRESSION_MASK, SPLAT_FLAG_COMPRESSION_SHIFT,
                    codec);
 
-  FILE *fp = fopen(argv[1], "wb");
+  FILE *fp = fopen(out_path, "wb");
   if (!fp) {
-    LOG_ERROR("❌ Unable to create '%s': %s\n", argv[1], strerror(errno));
+    LOG_ERROR("❌ Unable to create '%s': %s\n", out_path, strerror(errno));
     free_splat4DVideo(&video);
     return EXIT_FAILURE;
   }
   bool wrote = write_splat4DVideo(fp, &video);
   fclose(fp);
-  printf("✅ Encoded %ux%u image (%u colors) to '%s'\n", w, h, video.header.pSize, argv[1]);
+  printf("✅ Encoded %ux%u image (%u colors) to '%s'\n", w, h, video.header.pSize, out_path);
   free_splat4DVideo(&video);
   return wrote ? EXIT_SUCCESS : EXIT_FAILURE;
 }
@@ -3686,22 +3886,13 @@ static int command_decode_image(int argc, char **argv) {
 }
 
 static int command_encode_video(int argc, char **argv) {
-  uint32_t codec = SPLAT_COMPRESSION_NONE;
-  int a = 0;
-  if (argc >= 2 && strcmp(argv[0], "--compress") == 0) {
-    if (!parse_compression_name(argv[1], &codec)) {
-      LOG_ERROR("❌ Unknown compression scheme '%s'\n", argv[1]);
-      return EXIT_FAILURE;
-    }
-    if (!splat_compression_available(codec)) {
-      LOG_ERROR("❌ Compression scheme not available in this build: %s\n",
-                splat_compression_display_name(codec));
-      return EXIT_FAILURE;
-    }
-    a = 2;
-  }
+  uint32_t codec = 0, max_colors = 0;
+  int a = parse_encode_options(argc, argv, &codec, &max_colors);
+  if (a < 0)
+    return EXIT_FAILURE;
   if (argc - a < 2) {
-    LOG_ERROR("❌ Usage: 4splat encode-video [--compress <scheme>] <out.4spl> <frame.ppm>...\n");
+    LOG_ERROR("❌ Usage: 4splat encode-video [--compress <scheme>] [--colors <N>] "
+              "<out.4spl> <frame.ppm>...\n");
     return EXIT_FAILURE;
   }
   const char *out_path = argv[a++];
@@ -3731,7 +3922,8 @@ static int command_encode_video(int argc, char **argv) {
   }
 
   Splat4DVideo video;
-  bool built = ok && frames_to_video((const uint8_t *const *)frames, nframes, w, h, &video);
+  bool built = ok && frames_to_video_quantized((const uint8_t *const *)frames, nframes, w, h,
+                                               max_colors, &video);
   for (uint32_t t = 0; t < nframes; ++t)
     free(frames[t]);
   free(frames);
