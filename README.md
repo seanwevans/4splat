@@ -297,10 +297,12 @@ and update the color-space field:
 ```
 
 Supported target/source spaces are `srgb`, `linear-srgb`, `display-p3`,
-`rec709`, `rec2020`, `prophoto`, `lab`, `xyz-d65` and `xyz-d50`. The remaining
-enumerated spaces (OKLab, the ACES and Rec.2100/Rec.601/DCI-P3 variants) are
-recognized as tags and round-trip in the container, but are refused as
-conversion endpoints with a clear diagnostic rather than being approximated.
+`rec709`, `rec2020`, `prophoto`, `lab`, `xyz-d65`, `xyz-d50` and `oklab`. OKLab
+is implemented directly (it is not an ICC space) and pivots through sRGB, so it
+converts to and from any of the others too. The remaining enumerated spaces (the
+ACES and Rec.2100/Rec.601/DCI-P3 variants) are recognized as tags and round-trip
+in the container, but are refused as conversion endpoints with a clear
+diagnostic rather than being approximated.
 
 ## Test Suite
 
