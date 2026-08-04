@@ -416,22 +416,6 @@ static inline Splat4DFlags splat4d_flags_from_raw(uint32_t raw) {
   return (Splat4DFlags){.raw = raw};
 }
 
-static inline Splat4DFlags
-splat4d_flags_make(SplatEndian endian, SplatSortOrder sort_order, SplatPrecision precision,
-                   SplatCompression compression, SplatIndexWidth index_width, SplatShape shape,
-                   SplatColorSpace color_space, SplatInterpolation interpolation) {
-  Splat4DFlags flags = {.raw = 0};
-  flags.bits.endian = endian;
-  flags.bits.sorted = sort_order;
-  flags.bits.precision = precision;
-  flags.bits.compression = compression;
-  flags.bits.index_width = index_width;
-  flags.bits.splat_shape = shape;
-  flags.bits.color_space = color_space;
-  flags.bits.interpolation = interpolation;
-  return flags;
-}
-
 static const char *splat_endian_name(SplatEndian e) {
   switch (e) {
   case SPLAT_ENDIAN_LITTLE:
