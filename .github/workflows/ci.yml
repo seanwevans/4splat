@@ -67,3 +67,23 @@ jobs:
         run: ${{ matrix.compiler }} -Wall -Wpedantic -std=c11 -DUNIT_TEST -o tests/test_4splat tests/test_4splat.c
       - name: Run tests
         run: ./tests/test_4splat
+
+  full-features:
+    name: Full-featured build and tests (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: ["gcc", "clang"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compression libraries and compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev libbz2-dev liblzma-dev \
+            libbrotli-dev libzstd-dev liblz4-dev liblcms2-dev
+          if [ "${{ matrix.compiler }}" = "clang" ]; then sudo apt-get install -y clang; fi
+      - name: Build full-featured binary
+        run: make CC=${{ matrix.compiler }}
+      - name: Build and run full-featured tests
+        run: make CC=${{ matrix.compiler }} test

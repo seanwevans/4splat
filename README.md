@@ -162,6 +162,93 @@
  ╰───────────────────────────────────────────────────────────────────────╯
 ```
 
+## Building
+
+The codec is a single translation unit. A bare build is fully self-contained and
+needs no third-party libraries:
+
+```bash
+make plain          # or: gcc -Wall -Wpedantic -std=c11 -o 4splat 4splat.c
+```
+
+In this configuration the index payload can be stored with the **None** or
+**RLE** compression schemes. The remaining schemes in the format spec are
+provided by mature third-party libraries, enabled at compile time:
+
+```bash
+make                # full-featured build (links all backends below)
+```
+
+| Flag value | Scheme | Backend | Build macro |
+| --- | --- | --- | --- |
+| `0000` | None | built-in | always |
+| `0001` | RLE | built-in | always |
+| `0010` | DEFLATE | zlib (raw) | `SPLAT_WITH_ZLIB` |
+| `0101` | zlib | zlib | `SPLAT_WITH_ZLIB` |
+| `0110` | bzip2 | libbz2 | `SPLAT_WITH_BZIP2` |
+| `0111` | LZMA | liblzma | `SPLAT_WITH_LZMA` |
+| `1001` | XZ | liblzma | `SPLAT_WITH_LZMA` |
+| `1010` | LZ4 | liblz4 | `SPLAT_WITH_LZ4` |
+| `1101` | Brotli | libbrotli | `SPLAT_WITH_BROTLI` |
+| `1111` | Zstd | libzstd | `SPLAT_WITH_ZSTD` |
+
+`SPLAT_WITH_ALL` turns on every backend at once. The remaining scheme values
+(RAR, LZO, ZPAQ, Snappy, LZHAM, LZFSE) have no free-to-link encoder available and
+are rejected on read with a clear diagnostic. Compression applies only to the
+index section; the checksum always covers the uncompressed logical payload, so a
+file written by one build reads identically on another regardless of the codec
+library version.
+
+The palette is stored at the precision named by the header's precision field —
+float16, float32 (default) or float64 — and every descriptive flag field (index
+width, splat shape, color space, interpolation, sort order and the metadata byte)
+round-trips unchanged.
+
+## Selecting flags on the command line
+
+Rather than computing a raw `--flags` integer, `encode` accepts a named option
+for each flag field:
+
+```bash
+4splat encode --palette pal.bin --index idx.bin --output out.4spl \
+  --width 20 --height 20 --depth 1 --frames 1 \
+  --precision float64 --compression zstd --index-width 2 \
+  --color-space rec2020 --splat-shape axis-aligned --interpolation lanczos \
+  --sorted --metadata 42
+```
+
+| Option | Values |
+| --- | --- |
+| `--precision` | `float16`, `float32` (default), `float64` |
+| `--compression` | `none`, `rle`, `deflate`, `zlib`, `bzip2`, `lzma`, `xz`, `lz4`, `brotli`, `zstd` (plus the spec's other names, rejected if unbuilt) |
+| `--index-width` | `1`, `2`, `4`, `8` (bytes) |
+| `--splat-shape` | `isotropic`, `axis-aligned`, `full-covariance` |
+| `--color-space` | `srgb`, `rec2020`, `display-p3`, … (see below) |
+| `--interpolation` | `none`, `nearest`, `lanczos`, `gaussian`, … |
+| `--sorted` | (flag, no value) |
+| `--metadata` | `0`–`255` |
+
+`encode` refuses up front to write a file the current build could not read back
+— for example selecting `--compression zstd` in the dependency-free build fails
+with a clear message rather than producing an unreadable file. A raw `--flags`
+value is still accepted and individual named options override their field.
+
+## Color-space conversion
+
+When built with LittleCMS (`SPLAT_WITH_LCMS2`, included in `make`), `decode` can
+convert the palette colors from the space named in the header to another space
+and update the color-space field:
+
+```bash
+4splat decode --input in.4spl --to-color rec2020 --output out.4spl
+```
+
+Supported target/source spaces are `srgb`, `linear-srgb`, `display-p3`,
+`rec709`, `rec2020`, `prophoto`, `lab`, `xyz-d65` and `xyz-d50`. The remaining
+enumerated spaces (OKLab, the ACES and Rec.2100/Rec.601/DCI-P3 variants) are
+recognized as tags and round-trip in the container, but are refused as
+conversion endpoints with a clear diagnostic rather than being approximated.
+
 ## Test Suite
 
 | Test | Description |

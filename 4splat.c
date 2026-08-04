@@ -166,6 +166,46 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Optional compression backends.
+ *
+ * The reference codec is self-contained and builds with a bare `gcc 4splat.c`;
+ * in that configuration only the None and RLE schemes are available. Mature
+ * third-party libraries provide the remaining compression schemes from the
+ * format spec and are enabled at compile time (see the Makefile). Defining
+ * SPLAT_WITH_ALL turns on every backend the toolchain can link. */
+#ifdef SPLAT_WITH_ALL
+#define SPLAT_WITH_ZLIB
+#define SPLAT_WITH_BZIP2
+#define SPLAT_WITH_LZMA
+#define SPLAT_WITH_BROTLI
+#define SPLAT_WITH_ZSTD
+#define SPLAT_WITH_LZ4
+#define SPLAT_WITH_LCMS2
+#endif
+
+#ifdef SPLAT_WITH_ZLIB
+#include <zlib.h>
+#endif
+#ifdef SPLAT_WITH_BZIP2
+#include <bzlib.h>
+#endif
+#ifdef SPLAT_WITH_LZMA
+#include <lzma.h>
+#endif
+#ifdef SPLAT_WITH_BROTLI
+#include <brotli/decode.h>
+#include <brotli/encode.h>
+#endif
+#ifdef SPLAT_WITH_ZSTD
+#include <zstd.h>
+#endif
+#ifdef SPLAT_WITH_LZ4
+#include <lz4.h>
+#endif
+#ifdef SPLAT_WITH_LCMS2
+#include <lcms2.h>
+#endif
+
 #define LOG_ERROR(...) fprintf(stderr, __VA_ARGS__)
 #define SAFE_SNPRINTF(...) snprintf(__VA_ARGS__)
 
@@ -214,6 +254,11 @@ static uint32_t sanitize_flags(uint32_t flags) {
   return flags;
 }
 
+// Whether this build can (de)compress the index payload with the given codec,
+// and a human-readable name for it. Defined with the compression backends below.
+static bool splat_compression_available(uint32_t codec);
+static const char *splat_compression_display_name(uint32_t codec);
+
 // Validate that a flag word describes a file this build can decode. Fields that
 // only describe the payload (index width, splat shape, color space,
 // interpolation, sort order and the metadata byte) accept every value and are
@@ -231,9 +276,10 @@ static bool flags_supported(uint32_t flags) {
     return false;
   }
 
-  uint32_t compression = flags & SPLAT_FLAG_COMPRESSION_MASK;
-  if (compression != 0) {
-    LOG_ERROR("❌ Unsupported compression scheme (0x%08X)\n", compression);
+  uint32_t compression = (flags & SPLAT_FLAG_COMPRESSION_MASK) >> SPLAT_FLAG_COMPRESSION_SHIFT;
+  if (!splat_compression_available(compression)) {
+    LOG_ERROR("❌ Compression scheme not available in this build: %s\n",
+              splat_compression_display_name(compression));
     return false;
   }
 
@@ -638,7 +684,9 @@ static const uint32_t crc32_table[256] = {
     0xb3667a2e, 0xc4614ab8, 0x5d681b02, 0x2a6f2b94, 0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d,
 };
 
-uint32_t crc32(const void *data, size_t len) {
+// Named splat_crc32 rather than crc32 to avoid colliding with zlib's crc32()
+// when SPLAT_WITH_ZLIB is enabled.
+uint32_t splat_crc32(const void *data, size_t len) {
   const uint8_t *p = data;
   uint32_t crc = 0xFFFFFFFF;
   for (size_t i = 0; i < len; i++) {
@@ -661,6 +709,498 @@ static inline void crc32_update(crc32_t *c, const void *p, size_t n) {
 }
 
 static inline uint32_t crc32_final(crc32_t *c) { return ~c->v; }
+
+// --- compression backends ---------------------------------------------------
+//
+// The index payload (the packed run of palette references) can be stored using
+// any of the compression schemes the format defines. None and RLE are always
+// available; the rest are provided by third-party libraries compiled in via the
+// SPLAT_WITH_* macros. Each backend exposes the same shape: compress() returns a
+// freshly malloc'd buffer, decompress() fills a caller-provided buffer whose
+// size is known from the header (total indices * index width).
+
+// Hand-rolled byte-oriented run-length encoding: a stream of (count, value)
+// pairs with 1 <= count <= 255. Always available, no dependencies.
+static uint8_t *rle_compress(const uint8_t *in, size_t n, size_t *out_len) {
+  if (n > SIZE_MAX / 2)
+    return NULL;
+  size_t cap = n ? n * 2 : 2;
+  uint8_t *out = malloc(cap);
+  if (!out)
+    return NULL;
+  size_t o = 0, i = 0;
+  while (i < n) {
+    uint8_t v = in[i];
+    size_t run = 1;
+    while (i + run < n && in[i + run] == v && run < 255)
+      run++;
+    out[o++] = (uint8_t)run;
+    out[o++] = v;
+    i += run;
+  }
+  *out_len = o;
+  return out;
+}
+
+static bool rle_decompress(const uint8_t *in, size_t n, uint8_t *out, size_t expected) {
+  size_t o = 0, i = 0;
+  while (i + 1 < n) {
+    uint8_t run = in[i];
+    uint8_t v = in[i + 1];
+    i += 2;
+    if (run == 0 || o + run > expected)
+      return false;
+    memset(out + o, v, run);
+    o += run;
+  }
+  return i == n && o == expected;
+}
+
+#ifdef SPLAT_WITH_ZLIB
+// windowBits selects the wrapper: -15 = raw DEFLATE, 15 = zlib.
+static uint8_t *zlib_do_compress(const uint8_t *in, size_t n, size_t *out_len, int windowBits) {
+  if (n > UINT_MAX)
+    return NULL;
+  z_stream zs;
+  memset(&zs, 0, sizeof zs);
+  if (deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+    return NULL;
+  uLong bound = deflateBound(&zs, (uLong)n);
+  uint8_t *out = malloc(bound ? bound : 1);
+  if (!out) {
+    deflateEnd(&zs);
+    return NULL;
+  }
+  zs.next_in = (Bytef *)in;
+  zs.avail_in = (uInt)n;
+  zs.next_out = out;
+  zs.avail_out = (uInt)bound;
+  int r = deflate(&zs, Z_FINISH);
+  if (r != Z_STREAM_END) {
+    free(out);
+    deflateEnd(&zs);
+    return NULL;
+  }
+  *out_len = zs.total_out;
+  deflateEnd(&zs);
+  return out;
+}
+
+static bool zlib_do_decompress(const uint8_t *in, size_t n, uint8_t *out, size_t expected,
+                               int windowBits) {
+  if (n > UINT_MAX || expected > UINT_MAX)
+    return false;
+  z_stream zs;
+  memset(&zs, 0, sizeof zs);
+  if (inflateInit2(&zs, windowBits) != Z_OK)
+    return false;
+  zs.next_in = (Bytef *)in;
+  zs.avail_in = (uInt)n;
+  zs.next_out = out;
+  zs.avail_out = (uInt)expected;
+  int r = inflate(&zs, Z_FINISH);
+  bool ok = (r == Z_STREAM_END) && zs.total_out == expected;
+  inflateEnd(&zs);
+  return ok;
+}
+#endif
+
+#ifdef SPLAT_WITH_LZMA
+// Drive an already-initialized encoder or decoder stream to completion.
+static uint8_t *lzma_stream_run(lzma_stream *strm, const uint8_t *in, size_t in_len,
+                                size_t *out_len) {
+  size_t cap = in_len / 2 + 4096;
+  uint8_t *out = malloc(cap);
+  if (!out) {
+    lzma_end(strm);
+    return NULL;
+  }
+  strm->next_in = in;
+  strm->avail_in = in_len;
+  strm->next_out = out;
+  strm->avail_out = cap;
+  for (;;) {
+    lzma_ret r = lzma_code(strm, LZMA_FINISH);
+    if (r == LZMA_STREAM_END)
+      break;
+    if (r != LZMA_OK) {
+      free(out);
+      lzma_end(strm);
+      return NULL;
+    }
+    if (strm->avail_out == 0) {
+      size_t used = cap;
+      if (cap > SIZE_MAX / 2) {
+        free(out);
+        lzma_end(strm);
+        return NULL;
+      }
+      size_t ncap = cap * 2;
+      uint8_t *grown = realloc(out, ncap);
+      if (!grown) {
+        free(out);
+        lzma_end(strm);
+        return NULL;
+      }
+      out = grown;
+      strm->next_out = out + used;
+      strm->avail_out = ncap - used;
+      cap = ncap;
+    }
+  }
+  *out_len = cap - strm->avail_out;
+  lzma_end(strm);
+  return out;
+}
+
+static uint8_t *lzma_do_compress(const uint8_t *in, size_t n, size_t *out_len, bool xz) {
+  lzma_stream strm = LZMA_STREAM_INIT;
+  if (xz) {
+    if (lzma_easy_encoder(&strm, LZMA_PRESET_DEFAULT, LZMA_CHECK_CRC64) != LZMA_OK)
+      return NULL;
+  } else {
+    lzma_options_lzma opt;
+    if (lzma_lzma_preset(&opt, LZMA_PRESET_DEFAULT))
+      return NULL;
+    if (lzma_alone_encoder(&strm, &opt) != LZMA_OK)
+      return NULL;
+  }
+  return lzma_stream_run(&strm, in, n, out_len);
+}
+
+static bool lzma_do_decompress(const uint8_t *in, size_t n, uint8_t *out, size_t expected,
+                               bool xz) {
+  lzma_stream strm = LZMA_STREAM_INIT;
+  if (xz) {
+    if (lzma_stream_decoder(&strm, UINT64_MAX, 0) != LZMA_OK)
+      return false;
+  } else {
+    if (lzma_alone_decoder(&strm, UINT64_MAX) != LZMA_OK)
+      return false;
+  }
+  size_t got = 0;
+  uint8_t *buf = lzma_stream_run(&strm, in, n, &got);
+  if (!buf)
+    return false;
+  bool ok = (got == expected);
+  if (ok)
+    memcpy(out, buf, expected);
+  free(buf);
+  return ok;
+}
+#endif
+
+// Is the given compression codec (a 4-bit flag value) usable in this build?
+static bool splat_compression_available(uint32_t codec) {
+  switch (codec) {
+  case SPLAT_COMPRESSION_NONE:
+  case SPLAT_COMPRESSION_RUN_LENGTH:
+    return true;
+#ifdef SPLAT_WITH_ZLIB
+  case SPLAT_COMPRESSION_DEFLATE:
+  case SPLAT_COMPRESSION_ZLIB:
+    return true;
+#endif
+#ifdef SPLAT_WITH_BZIP2
+  case SPLAT_COMPRESSION_BZIP2:
+    return true;
+#endif
+#ifdef SPLAT_WITH_LZMA
+  case SPLAT_COMPRESSION_LZMA:
+  case SPLAT_COMPRESSION_XZ:
+    return true;
+#endif
+#ifdef SPLAT_WITH_LZ4
+  case SPLAT_COMPRESSION_LZ4:
+    return true;
+#endif
+#ifdef SPLAT_WITH_BROTLI
+  case SPLAT_COMPRESSION_BROTLI:
+    return true;
+#endif
+#ifdef SPLAT_WITH_ZSTD
+  case SPLAT_COMPRESSION_ZSTD:
+    return true;
+#endif
+  default:
+    return false;
+  }
+}
+
+static const char *splat_compression_display_name(uint32_t codec) {
+  static const char *names[16] = {"None",  "RLE",    "DEFLATE", "RAR", "LZO", "zlib",
+                                  "bzip2", "LZMA",   "ZPAQ",    "XZ",  "LZ4", "Snappy",
+                                  "LZHAM", "Brotli", "LZFSE",   "Zstd"};
+  return codec < 16 ? names[codec] : "Unknown";
+}
+
+// Compress in[0..in_len) with `codec`; returns a malloc'd buffer (caller frees)
+// and stores its length in *out_len, or NULL on failure / unavailable codec.
+static uint8_t *splat_compress(uint32_t codec, const uint8_t *in, size_t in_len, size_t *out_len) {
+  switch (codec) {
+  case SPLAT_COMPRESSION_RUN_LENGTH:
+    return rle_compress(in, in_len, out_len);
+#ifdef SPLAT_WITH_ZLIB
+  case SPLAT_COMPRESSION_DEFLATE:
+    return zlib_do_compress(in, in_len, out_len, -15);
+  case SPLAT_COMPRESSION_ZLIB:
+    return zlib_do_compress(in, in_len, out_len, 15);
+#endif
+#ifdef SPLAT_WITH_BZIP2
+  case SPLAT_COMPRESSION_BZIP2: {
+    if (in_len > UINT_MAX)
+      return NULL;
+    unsigned int bound = (unsigned int)in_len + in_len / 100 + 600;
+    uint8_t *out = malloc(bound ? bound : 1);
+    if (!out)
+      return NULL;
+    unsigned int dst_len = bound;
+    int r = BZ2_bzBuffToBuffCompress((char *)out, &dst_len, (char *)(uintptr_t)in,
+                                     (unsigned int)in_len, 9, 0, 0);
+    if (r != BZ_OK) {
+      free(out);
+      return NULL;
+    }
+    *out_len = dst_len;
+    return out;
+  }
+#endif
+#ifdef SPLAT_WITH_LZMA
+  case SPLAT_COMPRESSION_LZMA:
+    return lzma_do_compress(in, in_len, out_len, false);
+  case SPLAT_COMPRESSION_XZ:
+    return lzma_do_compress(in, in_len, out_len, true);
+#endif
+#ifdef SPLAT_WITH_LZ4
+  case SPLAT_COMPRESSION_LZ4: {
+    if (in_len > (size_t)LZ4_MAX_INPUT_SIZE)
+      return NULL;
+    int bound = LZ4_compressBound((int)in_len);
+    if (bound <= 0)
+      return NULL;
+    uint8_t *out = malloc((size_t)bound);
+    if (!out)
+      return NULL;
+    int wrote = LZ4_compress_default((const char *)in, (char *)out, (int)in_len, bound);
+    if (wrote <= 0) {
+      free(out);
+      return NULL;
+    }
+    *out_len = (size_t)wrote;
+    return out;
+  }
+#endif
+#ifdef SPLAT_WITH_BROTLI
+  case SPLAT_COMPRESSION_BROTLI: {
+    size_t bound = BrotliEncoderMaxCompressedSize(in_len);
+    if (bound == 0)
+      bound = in_len + 1024;
+    uint8_t *out = malloc(bound);
+    if (!out)
+      return NULL;
+    size_t dst_len = bound;
+    if (!BrotliEncoderCompress(BROTLI_DEFAULT_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_MODE_GENERIC,
+                               in_len, in, &dst_len, out)) {
+      free(out);
+      return NULL;
+    }
+    *out_len = dst_len;
+    return out;
+  }
+#endif
+#ifdef SPLAT_WITH_ZSTD
+  case SPLAT_COMPRESSION_ZSTD: {
+    size_t bound = ZSTD_compressBound(in_len);
+    uint8_t *out = malloc(bound ? bound : 1);
+    if (!out)
+      return NULL;
+    size_t wrote = ZSTD_compress(out, bound, in, in_len, ZSTD_CLEVEL_DEFAULT);
+    if (ZSTD_isError(wrote)) {
+      free(out);
+      return NULL;
+    }
+    *out_len = wrote;
+    return out;
+  }
+#endif
+  default:
+    return NULL;
+  }
+}
+
+// Decompress in[0..in_len) into out[0..expected_len) using `codec`. The output
+// size is exact and known from the header, so any mismatch is a hard failure.
+static bool splat_decompress(uint32_t codec, const uint8_t *in, size_t in_len, uint8_t *out,
+                             size_t expected_len) {
+  switch (codec) {
+  case SPLAT_COMPRESSION_RUN_LENGTH:
+    return rle_decompress(in, in_len, out, expected_len);
+#ifdef SPLAT_WITH_ZLIB
+  case SPLAT_COMPRESSION_DEFLATE:
+    return zlib_do_decompress(in, in_len, out, expected_len, -15);
+  case SPLAT_COMPRESSION_ZLIB:
+    return zlib_do_decompress(in, in_len, out, expected_len, 15);
+#endif
+#ifdef SPLAT_WITH_BZIP2
+  case SPLAT_COMPRESSION_BZIP2: {
+    if (in_len > UINT_MAX || expected_len > UINT_MAX)
+      return false;
+    unsigned int dst_len = (unsigned int)expected_len;
+    int r = BZ2_bzBuffToBuffDecompress((char *)out, &dst_len, (char *)(uintptr_t)in,
+                                       (unsigned int)in_len, 0, 0);
+    return r == BZ_OK && dst_len == expected_len;
+  }
+#endif
+#ifdef SPLAT_WITH_LZMA
+  case SPLAT_COMPRESSION_LZMA:
+    return lzma_do_decompress(in, in_len, out, expected_len, false);
+  case SPLAT_COMPRESSION_XZ:
+    return lzma_do_decompress(in, in_len, out, expected_len, true);
+#endif
+#ifdef SPLAT_WITH_LZ4
+  case SPLAT_COMPRESSION_LZ4: {
+    if (in_len > INT_MAX || expected_len > INT_MAX)
+      return false;
+    int got = LZ4_decompress_safe((const char *)in, (char *)out, (int)in_len, (int)expected_len);
+    return got >= 0 && (size_t)got == expected_len;
+  }
+#endif
+#ifdef SPLAT_WITH_BROTLI
+  case SPLAT_COMPRESSION_BROTLI: {
+    size_t dst_len = expected_len;
+    BrotliDecoderResult r = BrotliDecoderDecompress(in_len, in, &dst_len, out);
+    return r == BROTLI_DECODER_RESULT_SUCCESS && dst_len == expected_len;
+  }
+#endif
+#ifdef SPLAT_WITH_ZSTD
+  case SPLAT_COMPRESSION_ZSTD: {
+    size_t got = ZSTD_decompress(out, expected_len, in, in_len);
+    return !ZSTD_isError(got) && got == expected_len;
+  }
+#endif
+  default:
+    return false;
+  }
+}
+
+// --- color-space conversion (LittleCMS) -------------------------------------
+//
+// The header names the color space the palette RGB values live in. When the
+// lcms2 backend is compiled in, the palette colors can be converted between a
+// documented subset of those spaces; the color-space field is updated to match.
+// Spaces outside the subset (OKLab, the ACES and Rec.2100 variants, DCI-P3,
+// Rec.601) are rejected with a diagnostic rather than silently mishandled.
+#ifdef SPLAT_WITH_LCMS2
+static cmsToneCurve *splat_srgb_curve(void) {
+  // IEC 61966-2-1 sRGB transfer function as an ICC parametric type-4 curve.
+  cmsFloat64Number params[5] = {2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045};
+  return cmsBuildParametricToneCurve(NULL, 4, params);
+}
+
+static cmsHPROFILE splat_rgb_profile(cmsCIExyY white, cmsCIExyYTRIPLE primaries, double gamma) {
+  cmsToneCurve *tc = (gamma <= 0.0) ? splat_srgb_curve() : cmsBuildGamma(NULL, gamma);
+  if (!tc)
+    return NULL;
+  cmsToneCurve *curves[3] = {tc, tc, tc};
+  cmsHPROFILE profile = cmsCreateRGBProfile(&white, &primaries, curves);
+  cmsFreeToneCurve(tc);
+  return profile;
+}
+
+// Resolve a color space to an lcms profile and matching float pixel format.
+// Returns false for spaces this backend does not model.
+static bool splat_space_profile(uint32_t space, cmsHPROFILE *profile, cmsUInt32Number *format) {
+  const cmsCIExyY d65 = {0.3127, 0.3290, 1.0};
+  const cmsCIExyY d50 = {0.3457, 0.3585, 1.0};
+  switch (space) {
+  case SPLAT_COLOR_SRGB:
+  case SPLAT_COLOR_REC709: { // Rec.709 shares the sRGB primaries/white point
+    *profile = cmsCreate_sRGBProfile();
+    *format = TYPE_RGB_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_LINEAR_SRGB: {
+    cmsCIExyYTRIPLE p = {{0.640, 0.330, 1}, {0.300, 0.600, 1}, {0.150, 0.060, 1}};
+    *profile = splat_rgb_profile(d65, p, 1.0);
+    *format = TYPE_RGB_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_DISPLAY_P3: {
+    cmsCIExyYTRIPLE p = {{0.680, 0.320, 1}, {0.265, 0.690, 1}, {0.150, 0.060, 1}};
+    *profile = splat_rgb_profile(d65, p, 0.0); // sRGB transfer
+    *format = TYPE_RGB_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_REC2020: {
+    cmsCIExyYTRIPLE p = {{0.708, 0.292, 1}, {0.170, 0.797, 1}, {0.131, 0.046, 1}};
+    *profile = splat_rgb_profile(d65, p, 0.0);
+    *format = TYPE_RGB_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_PROPHOTO_RGB: {
+    cmsCIExyYTRIPLE p = {{0.7347, 0.2653, 1}, {0.1596, 0.8404, 1}, {0.0366, 0.0001, 1}};
+    *profile = splat_rgb_profile(d50, p, 1.8);
+    *format = TYPE_RGB_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_CIE_LAB: {
+    *profile = cmsCreateLab4Profile(NULL);
+    *format = TYPE_Lab_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_CIE_XYZ_D65:
+  case SPLAT_COLOR_CIE_XYZ_D50:
+  case SPLAT_COLOR_CIE_XYZ_D65_ALT: {
+    *profile = cmsCreateXYZProfile();
+    *format = TYPE_XYZ_FLT;
+    return *profile != NULL;
+  }
+  default:
+    return false;
+  }
+}
+
+// Convert every palette entry's (r, g, b) from `from` to `to`. Non-RGB targets
+// (Lab, XYZ) leave their channel values in the r/g/b slots.
+static bool splat_convert_palette_colors(Splat4D *palette, uint32_t count, uint32_t from,
+                                         uint32_t to) {
+  if (from == to)
+    return true;
+
+  cmsHPROFILE in_profile = NULL, out_profile = NULL;
+  cmsUInt32Number in_format = 0, out_format = 0;
+  if (!splat_space_profile(from, &in_profile, &in_format)) {
+    LOG_ERROR("❌ Color-space conversion from %s is not supported\n",
+              splat_color_space_name((SplatColorSpace)from));
+    return false;
+  }
+  if (!splat_space_profile(to, &out_profile, &out_format)) {
+    LOG_ERROR("❌ Color-space conversion to %s is not supported\n",
+              splat_color_space_name((SplatColorSpace)to));
+    cmsCloseProfile(in_profile);
+    return false;
+  }
+
+  cmsHTRANSFORM xform = cmsCreateTransform(in_profile, in_format, out_profile, out_format,
+                                           INTENT_RELATIVE_COLORIMETRIC,
+                                           cmsFLAGS_BLACKPOINTCOMPENSATION | cmsFLAGS_NOOPTIMIZE);
+  cmsCloseProfile(in_profile);
+  cmsCloseProfile(out_profile);
+  if (!xform)
+    return false;
+
+  for (uint32_t i = 0; i < count; ++i) {
+    float in[3] = {palette[i].r, palette[i].g, palette[i].b};
+    float out[3];
+    cmsDoTransform(xform, in, out, 1);
+    palette[i].r = out[0];
+    palette[i].g = out[1];
+    palette[i].b = out[2];
+  }
+  cmsDeleteTransform(xform);
+  return true;
+}
+#endif // SPLAT_WITH_LCMS2
 
 // streaming helpers //
 typedef bool (*Splat4DChunkFn)(const uint8_t *chunk, size_t n, void *ctx);
@@ -1376,6 +1916,44 @@ void print_splat4DIndex(const Splat4DVideo *v) {
   }
 }
 
+// Pack the 64-bit index array down to idx_width bytes/entry into `out`
+// (malloc'd, so suitably aligned for the wider element writes).
+static void pack_index_to_buffer(const uint64_t *src, uint64_t total, uint8_t idx_width,
+                                 uint8_t *out) {
+  if (idx_width == 8) {
+    memcpy(out, src, (size_t)total * 8);
+  } else if (idx_width == 1) {
+    for (uint64_t k = 0; k < total; k++)
+      out[k] = (uint8_t)src[k];
+  } else if (idx_width == 2) {
+    uint16_t *p = (uint16_t *)out;
+    for (uint64_t k = 0; k < total; k++)
+      p[k] = (uint16_t)src[k];
+  } else {
+    uint32_t *p = (uint32_t *)out;
+    for (uint64_t k = 0; k < total; k++)
+      p[k] = (uint32_t)src[k];
+  }
+}
+
+static void unpack_index_from_buffer(const uint8_t *in, uint64_t total, uint8_t idx_width,
+                                     uint64_t *out) {
+  if (idx_width == 8) {
+    memcpy(out, in, (size_t)total * 8);
+  } else if (idx_width == 1) {
+    for (uint64_t k = 0; k < total; k++)
+      out[k] = in[k];
+  } else if (idx_width == 2) {
+    const uint16_t *p = (const uint16_t *)in;
+    for (uint64_t k = 0; k < total; k++)
+      out[k] = p[k];
+  } else {
+    const uint32_t *p = (const uint32_t *)in;
+    for (uint64_t k = 0; k < total; k++)
+      out[k] = p[k];
+  }
+}
+
 bool write_splat4DIndex(FILE *fp, const Splat4DIndex *i, uint64_t total, uint32_t flags) {
   if (!fp || !i || !i->index || total == 0)
     return false;
@@ -1523,6 +2101,78 @@ void print_splat4DVideo(const Splat4DVideo *v) {
   printf("╰────────────────────────────╯\n");
 }
 
+// Pack the index to the header's index width, compress it with `codec` and
+// write the compressed bytes. Used for the on-disk index section whenever the
+// compression field is not None.
+static bool write_index_compressed(FILE *fp, const Splat4DVideo *v, uint32_t codec) {
+  uint64_t total = header_total_indices(&v->header);
+  uint8_t idx_width = get_index_width_bytes(v->header.flags);
+  uint64_t packed64;
+  if (!checked_mul_u64(total, idx_width, &packed64) || packed64 > SIZE_MAX)
+    return false;
+  size_t packed_len = (size_t)packed64;
+
+  uint8_t *packed = malloc(packed_len ? packed_len : 1);
+  if (!packed)
+    return false;
+  pack_index_to_buffer(v->index.index, total, idx_width, packed);
+
+  size_t clen = 0;
+  uint8_t *comp = splat_compress(codec, packed, packed_len, &clen);
+  free(packed);
+  if (!comp)
+    return false;
+
+  bool ok = fwrite(comp, 1, clen, fp) == clen;
+  free(comp);
+  return ok;
+}
+
+// Read `comp_len` compressed bytes, decompress to the exact index-payload size
+// and unpack into a freshly allocated 64-bit index array.
+static bool read_index_compressed(FILE *fp, Splat4DIndex *idx, uint64_t total, uint32_t flags,
+                                  size_t comp_len, uint32_t codec) {
+  uint8_t idx_width = get_index_width_bytes(flags);
+  uint64_t packed64;
+  if (!checked_mul_u64(total, idx_width, &packed64) || packed64 > SIZE_MAX)
+    return false;
+  size_t packed_len = (size_t)packed64;
+
+  uint8_t *cbuf = malloc(comp_len ? comp_len : 1);
+  if (!cbuf)
+    return false;
+  if (fread(cbuf, 1, comp_len, fp) != comp_len) {
+    free(cbuf);
+    return false;
+  }
+
+  uint8_t *packed = malloc(packed_len ? packed_len : 1);
+  if (!packed) {
+    free(cbuf);
+    return false;
+  }
+  bool ok = splat_decompress(codec, cbuf, comp_len, packed, packed_len);
+  free(cbuf);
+  if (!ok) {
+    free(packed);
+    return false;
+  }
+
+  uint64_t mem64;
+  if (!checked_mul_u64(total, (uint64_t)sizeof(uint64_t), &mem64) || mem64 > SIZE_MAX) {
+    free(packed);
+    return false;
+  }
+  idx->index = malloc((size_t)mem64);
+  if (!idx->index) {
+    free(packed);
+    return false;
+  }
+  unpack_index_from_buffer(packed, total, idx_width, idx->index);
+  free(packed);
+  return true;
+}
+
 bool write_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   if (!fp || !v)
     return false;
@@ -1532,12 +2182,30 @@ bool write_splat4DVideo(FILE *fp, Splat4DVideo *v) {
       (uint64_t)sizeof(Splat4DHeader) +
       (uint64_t)v->header.pSize * (uint64_t)palette_entry_disk_bytes(v->header.flags);
 
-  crc32_t c;
-  crc32_init(&c);
-  Splat4DStreamFileCtx ctx = {.fp = fp, .crc = &c};
-  if (!stream_splat4DVideo(v, SPLAT4D_STREAM_CHUNK_SIZE, splat4d_stream_file_consumer, &ctx))
-    return false;
-  v->footer.checksum = crc32_final(&c);
+  uint32_t codec = (v->header.flags & SPLAT_FLAG_COMPRESSION_MASK) >> SPLAT_FLAG_COMPRESSION_SHIFT;
+
+  if (codec == SPLAT_COMPRESSION_NONE) {
+    // Uncompressed: the on-disk bytes equal the logical payload, so stream them
+    // straight to the file while accumulating the checksum.
+    crc32_t c;
+    crc32_init(&c);
+    Splat4DStreamFileCtx ctx = {.fp = fp, .crc = &c};
+    if (!stream_splat4DVideo(v, SPLAT4D_STREAM_CHUNK_SIZE, splat4d_stream_file_consumer, &ctx))
+      return false;
+    v->footer.checksum = crc32_final(&c);
+  } else {
+    // Compressed: the checksum covers the logical (uncompressed) payload so it
+    // is independent of the codec's byte output, while only the index section is
+    // physically compressed on disk.
+    v->footer.checksum = compute_video_checksum(v);
+    if (!write_splat4DHeader(fp, &v->header))
+      return false;
+    if (v->header.pSize > 0 &&
+        !write_splat4DPalette(fp, &v->palette, v->header.pSize, v->header.flags))
+      return false;
+    if (!write_index_compressed(fp, v, codec))
+      return false;
+  }
 
   // Return to end of file and write footer
   fseek(fp, 0, SEEK_END);
@@ -1598,10 +2266,37 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
     return false;
 
   // Read index
-  if (!read_splat4DIndex(fp, &v->index, total, v->header.flags)) {
-    free(v->palette.palette);
-    v->palette.palette = NULL;
-    return false;
+  uint32_t codec = (v->header.flags & SPLAT_FLAG_COMPRESSION_MASK) >> SPLAT_FLAG_COMPRESSION_SHIFT;
+  if (codec == SPLAT_COMPRESSION_NONE) {
+    if (!read_splat4DIndex(fp, &v->index, total, v->header.flags)) {
+      free(v->palette.palette);
+      v->palette.palette = NULL;
+      return false;
+    }
+  } else {
+    // The compressed index section runs from the current position (the index
+    // offset) up to the fixed-size footer at end of file.
+    long index_start = ftell(fp);
+    if (index_start < 0 || fseek(fp, 0, SEEK_END) != 0) {
+      free(v->palette.palette);
+      v->palette.palette = NULL;
+      return false;
+    }
+    long file_end = ftell(fp);
+    if (file_end < 0 || fseek(fp, index_start, SEEK_SET) != 0 ||
+        file_end < index_start + (long)sizeof(Splat4DFooter)) {
+      LOG_ERROR("❌ Truncated compressed index\n");
+      free(v->palette.palette);
+      v->palette.palette = NULL;
+      return false;
+    }
+    size_t comp_len = (size_t)(file_end - index_start) - sizeof(Splat4DFooter);
+    if (!read_index_compressed(fp, &v->index, total, v->header.flags, comp_len, codec)) {
+      LOG_ERROR("❌ Failed to decompress index\n");
+      free(v->palette.palette);
+      v->palette.palette = NULL;
+      return false;
+    }
   }
 
   // Read footer
@@ -1742,6 +2437,8 @@ typedef struct {
   const char *index_path;
   const char *output_path;
   MetadataOptions meta;
+  bool precision_set;       // an explicit --precision was given
+  uint32_t precision_value; // 0=float16, 1=float32, 2=float64
 } EncodeOptions;
 
 static void print_usage(FILE *stream) {
@@ -1749,8 +2446,116 @@ static void print_usage(FILE *stream) {
           "Usage:\n"
           "  4splat encode --palette <palette.bin> --index <index.bin> --output <file.4spl> "
           "--width <w> --height <h> --depth <d> --frames <f> [--palette-size <n>] [--flags <n>]\n"
+          "      [--precision float16|float32|float64] [--compression <scheme>] "
+          "[--index-width 1|2|4|8]\n"
+          "      [--splat-shape <shape>] [--color-space <space>] [--interpolation <mode>] "
+          "[--sorted] [--metadata <0-255>]\n"
           "  4splat decode --input <file.4spl> [--palette <palette.bin>] [--index <index.bin>] "
-          "[--print] [--validate]\n");
+          "[--output <file.4spl>] [--to-color <space>] [--print] [--validate]\n");
+}
+
+// Parse a color-space name (as used on the command line) into its flag value.
+static bool parse_color_space_name(const char *name, uint32_t *out) {
+  static const struct {
+    const char *name;
+    uint32_t value;
+  } table[] = {
+      {"srgb", SPLAT_COLOR_SRGB},
+      {"linear-srgb", SPLAT_COLOR_LINEAR_SRGB},
+      {"oklab", SPLAT_COLOR_OKLAB},
+      {"display-p3", SPLAT_COLOR_DISPLAY_P3},
+      {"rec709", SPLAT_COLOR_REC709},
+      {"rec2020", SPLAT_COLOR_REC2020},
+      {"dci-p3", SPLAT_COLOR_DCI_P3},
+      {"aces-ap0", SPLAT_COLOR_ACES_AP0},
+      {"prophoto", SPLAT_COLOR_PROPHOTO_RGB},
+      {"rec2100", SPLAT_COLOR_REC2100},
+      {"lab", SPLAT_COLOR_CIE_LAB},
+      {"xyz-d65", SPLAT_COLOR_CIE_XYZ_D65},
+      {"acescg-ap1", SPLAT_COLOR_ACESCG_AP1},
+      {"rec601", SPLAT_COLOR_REC601},
+      {"xyz-d50", SPLAT_COLOR_CIE_XYZ_D50},
+  };
+  for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
+    if (strcmp(name, table[i].name) == 0) {
+      *out = table[i].value;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool lookup_named_value(const char *name, uint32_t *out, const char *const *names,
+                               size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    if (names[i] && strcmp(name, names[i]) == 0) {
+      *out = (uint32_t)i;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool parse_precision_name(const char *name, uint32_t *out) {
+  if (!strcmp(name, "float16") || !strcmp(name, "f16") || !strcmp(name, "16"))
+    *out = 0;
+  else if (!strcmp(name, "float32") || !strcmp(name, "f32") || !strcmp(name, "32"))
+    *out = 1;
+  else if (!strcmp(name, "float64") || !strcmp(name, "f64") || !strcmp(name, "64"))
+    *out = 2;
+  else
+    return false;
+  return true;
+}
+
+static bool parse_index_width_name(const char *name, uint32_t *out) {
+  if (!strcmp(name, "1"))
+    *out = SPLAT_INDEX_WIDTH_8;
+  else if (!strcmp(name, "2"))
+    *out = SPLAT_INDEX_WIDTH_16;
+  else if (!strcmp(name, "4"))
+    *out = SPLAT_INDEX_WIDTH_32;
+  else if (!strcmp(name, "8"))
+    *out = SPLAT_INDEX_WIDTH_64;
+  else
+    return false;
+  return true;
+}
+
+static bool parse_splat_shape_name(const char *name, uint32_t *out) {
+  static const char *const names[] = {"isotropic", "axis-aligned", "full-covariance"};
+  return lookup_named_value(name, out, names, sizeof(names) / sizeof(names[0]));
+}
+
+static bool parse_compression_name(const char *name, uint32_t *out) {
+  static const char *const names[] = {"none",  "rle",    "deflate", "rar", "lzo", "zlib",
+                                      "bzip2", "lzma",   "zpaq",    "xz",  "lz4", "snappy",
+                                      "lzham", "brotli", "lzfse",   "zstd"};
+  return lookup_named_value(name, out, names, sizeof(names) / sizeof(names[0]));
+}
+
+static bool parse_interpolation_name(const char *name, uint32_t *out) {
+  static const char *const names[] = {"none",
+                                      "nearest",
+                                      "axis-aligned",
+                                      "smooth",
+                                      "lanczos",
+                                      "gaussian",
+                                      "catmull-rom",
+                                      "nurbs",
+                                      "rbf",
+                                      "optical-flow",
+                                      "neural",
+                                      "akima",
+                                      "inverse-distance",
+                                      "fourier",
+                                      "moving-least-squares",
+                                      "cubic-hermite"};
+  return lookup_named_value(name, out, names, sizeof(names) / sizeof(names[0]));
+}
+
+static void set_flag_field(uint32_t *flags, uint32_t mask, uint32_t shift, uint32_t value) {
+  *flags = (*flags & ~mask) | ((value << shift) & mask);
 }
 
 static bool parse_u32(const char *arg, uint32_t *out) {
@@ -1959,7 +2764,7 @@ static int execute_encode(EncodeOptions *opts) {
   }
   if (idx_check == SPLAT_INDEX_TOO_WIDE) {
     LOG_ERROR("❌ Index %" PRIu64 " at position %" PRIu64 " does not fit the %u-byte index width; "
-              "select a wider index width via --flags\n",
+              "select a wider index width via --index-width\n",
               indices[bad_pos], bad_pos, idx_width);
     free(palette);
     free(indices);
@@ -1969,6 +2774,20 @@ static int execute_encode(EncodeOptions *opts) {
   Splat4DHeader header =
       create_splat4DHeader(opts->meta.width, opts->meta.height, opts->meta.depth, opts->meta.frames,
                            opts->meta.palette_size, effective_flags);
+  // create_splat4DHeader normalizes an unset precision (float16 bits) up to
+  // float32; honor an explicit --precision float16 by restoring it here.
+  if (opts->precision_set)
+    set_flag_field(&header.flags, SPLAT_FLAG_PRECISION_MASK, SPLAT_FLAG_PRECISION_SHIFT,
+                   opts->precision_value);
+
+  // Refuse to emit a file this build could not read back (unsupported precision,
+  // a compression codec that is not linked in, reserved/encrypted fields).
+  if (!flags_supported(header.flags)) {
+    free(palette);
+    free(indices);
+    return EXIT_FAILURE;
+  }
+
   Splat4DVideo video = create_splat4DVideo(header, palette, indices);
 
   FILE *fp = fopen(opts->output_path, "wb");
@@ -2010,6 +2829,72 @@ static int command_encode(int argc, char **argv) {
         fprintf(stderr, "❌ Invalid value for %s\n", arg);
         return EXIT_FAILURE;
       }
+    } else if (strcmp(arg, "--precision") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_precision_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Unknown precision '%s' (float16|float32|float64)\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      opts.precision_set = true;
+      opts.precision_value = v;
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_PRECISION_MASK, SPLAT_FLAG_PRECISION_SHIFT, v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--compression") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_compression_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Unknown compression scheme '%s'\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_COMPRESSION_MASK, SPLAT_FLAG_COMPRESSION_SHIFT,
+                     v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--index-width") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_index_width_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Invalid index width '%s' (1|2|4|8)\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_INDEX_WIDTH_MASK, SPLAT_FLAG_INDEX_WIDTH_SHIFT,
+                     v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--splat-shape") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_splat_shape_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Unknown splat shape '%s' (isotropic|axis-aligned|full-covariance)\n",
+                argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_SPLAT_SHAPE_MASK, SPLAT_FLAG_SPLAT_SHAPE_SHIFT,
+                     v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--color-space") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_color_space_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Unknown color space '%s'\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_COLOR_SPACE_MASK, SPLAT_FLAG_COLOR_SPACE_SHIFT,
+                     v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--interpolation") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_interpolation_name(argv[++i], &v)) {
+        fprintf(stderr, "❌ Unknown interpolation '%s'\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_INTERP_MASK, SPLAT_FLAG_INTERP_SHIFT, v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--metadata") == 0 && i + 1 < argc) {
+      uint32_t v;
+      if (!parse_u32(argv[++i], &v) || v > 0xFF) {
+        fprintf(stderr, "❌ Invalid metadata byte '%s' (0-255)\n", argv[i]);
+        return EXIT_FAILURE;
+      }
+      set_flag_field(&opts.meta.flags, SPLAT_FLAG_METADATA_MASK, SPLAT_FLAG_METADATA_SHIFT, v);
+      opts.meta.flags_set = true;
+    } else if (strcmp(arg, "--sorted") == 0) {
+      opts.meta.flags |= SPLAT_FLAG_SORTED;
+      opts.meta.flags_set = true;
     } else {
       fprintf(stderr, "❌ Unknown or incomplete option '%s'\n", arg);
       return EXIT_FAILURE;
@@ -2030,6 +2915,8 @@ static int command_decode(int argc, char **argv) {
   const char *input_path = NULL;
   const char *palette_out = NULL;
   const char *index_out = NULL;
+  const char *output_path = NULL;
+  const char *to_color = NULL;
   bool print_summary = false;
   bool do_validate = false;
 
@@ -2041,6 +2928,10 @@ static int command_decode(int argc, char **argv) {
       palette_out = argv[++i];
     } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
       index_out = argv[++i];
+    } else if (strcmp(arg, "--output") == 0 && i + 1 < argc) {
+      output_path = argv[++i];
+    } else if (strcmp(arg, "--to-color") == 0 && i + 1 < argc) {
+      to_color = argv[++i];
     } else if (strcmp(arg, "--print") == 0) {
       print_summary = true;
     } else if (strcmp(arg, "--validate") == 0) {
@@ -2076,8 +2967,50 @@ static int command_decode(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
+  if (to_color) {
+    uint32_t target = 0;
+    if (!parse_color_space_name(to_color, &target)) {
+      LOG_ERROR("❌ Unknown color space '%s'\n", to_color);
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
+#ifdef SPLAT_WITH_LCMS2
+    uint32_t source =
+        (video.header.flags & SPLAT_FLAG_COLOR_SPACE_MASK) >> SPLAT_FLAG_COLOR_SPACE_SHIFT;
+    if (!splat_convert_palette_colors(video.palette.palette, video.header.pSize, source, target)) {
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
+    video.header.flags = (video.header.flags & ~SPLAT_FLAG_COLOR_SPACE_MASK) |
+                         (target << SPLAT_FLAG_COLOR_SPACE_SHIFT);
+    video.footer.checksum = compute_video_checksum(&video);
+    printf("✅ Converted palette to %s\n", splat_color_space_name((SplatColorSpace)target));
+#else
+    LOG_ERROR("❌ Color-space conversion requires a build with lcms2 (SPLAT_WITH_LCMS2)\n");
+    free_splat4DVideo(&video);
+    return EXIT_FAILURE;
+#endif
+  }
+
   if (print_summary)
     print_splat4DVideo(&video);
+
+  if (output_path) {
+    FILE *out = fopen(output_path, "wb");
+    if (!out) {
+      LOG_ERROR("❌ Unable to create '%s': %s\n", output_path, strerror(errno));
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
+    bool wrote = write_splat4DVideo(out, &video);
+    fclose(out);
+    if (!wrote) {
+      LOG_ERROR("❌ Failed to write '%s'\n", output_path);
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
+    printf("✅ Wrote 4Splat file to '%s'\n", output_path);
+  }
 
   if (palette_out && !save_palette_to_file(palette_out, &video)) {
     free_splat4DVideo(&video);

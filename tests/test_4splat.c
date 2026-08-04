@@ -61,7 +61,7 @@ static bool test_create_splat4D_zero_values(void) {
 
 static bool test_crc32_known_value(void) {
   const char *input = "123456789";
-  uint32_t actual = crc32(input, strlen(input));
+  uint32_t actual = splat_crc32(input, strlen(input));
   return actual == 0xCBF43926u;
 }
 
@@ -981,6 +981,145 @@ static bool test_round_trip_float16_palette(void) {
   return palette_match && precision_ok;
 }
 
+static bool test_rle_unit_roundtrip(void) {
+  const uint8_t in[] = {5, 5, 5, 5, 7, 7, 1, 2, 2, 2};
+  size_t clen = 0;
+  uint8_t *comp = rle_compress(in, sizeof in, &clen);
+  if (!comp)
+    return false;
+  uint8_t out[sizeof in];
+  bool ok = rle_decompress(comp, clen, out, sizeof in) && memcmp(in, out, sizeof in) == 0;
+  free(comp);
+  return ok;
+}
+
+// Round-trip a 64-index / 2-entry video through every compression codec the
+// current build can handle. Codecs the build lacks are skipped, so this test
+// exercises None + RLE in the plain build and all linked codecs in the full one.
+static bool test_round_trip_all_available_codecs(void) {
+  const uint64_t total = 64;
+  uint64_t *indices = malloc((size_t)total * sizeof(uint64_t));
+  if (!indices)
+    return false;
+  for (uint64_t k = 0; k < total; k++)
+    indices[k] = (k % 16 == 0) ? 1 : 0; // runs, so compression has something to do
+  Splat4D palette[2];
+  make_palette(palette);
+
+  bool result = true;
+  for (uint32_t codec = 0; codec < 16 && result; codec++) {
+    if (!splat_compression_available(codec))
+      continue;
+    uint32_t flags = SPLAT_FLAG_PRECISION_FLOAT32 | (codec << SPLAT_FLAG_COMPRESSION_SHIFT);
+    Splat4DHeader header = create_splat4DHeader(8, 8, 1, 1, 2, flags);
+    Splat4DVideo original = create_splat4DVideo(header, palette, indices);
+
+    FILE *fp = tmpfile();
+    if (!fp) {
+      result = false;
+      break;
+    }
+    bool ok = write_splat4DVideo(fp, &original);
+    if (ok) {
+      rewind(fp);
+      Splat4DVideo loaded;
+      ok = read_splat4DVideo(fp, &loaded);
+      if (ok) {
+        ok = memcmp(indices, loaded.index.index, (size_t)total * sizeof(uint64_t)) == 0;
+        free_splat4DVideo(&loaded);
+      }
+    }
+    fclose(fp);
+    if (!ok)
+      result = false;
+  }
+
+  free(indices);
+  return result;
+}
+
+static bool test_read_video_rejects_unavailable_codec(void) {
+  // RAR (codec 3) has no backend in any build, so a file tagged with it must be
+  // rejected on read.
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+  video.header.flags |= (SPLAT_COMPRESSION_RAR << SPLAT_FLAG_COMPRESSION_SHIFT);
+  video.footer.checksum = compute_video_checksum(&video);
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  // Write the (uncompressed) body directly so the tagged-but-unhandled codec is
+  // exercised purely on the read path.
+  bool wrote = write_splat4DHeader(fp, &video.header) &&
+               write_splat4DPalette(fp, &video.palette, video.header.pSize, video.header.flags) &&
+               write_splat4DIndex(fp, &video.index, header_total_indices(&video.header),
+                                  video.header.flags) &&
+               write_splat4DFooter(fp, &video.footer);
+  if (!wrote) {
+    fclose(fp);
+    return false;
+  }
+  rewind(fp);
+  Splat4DVideo loaded;
+  bool ok = !read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  return ok;
+}
+
+#ifdef SPLAT_WITH_LCMS2
+static float abs_diff(float a, float b) {
+  float d = a - b;
+  return d < 0 ? -d : d;
+}
+
+static bool test_color_convert_round_trip(void) {
+  Splat4D pal[3];
+  pal[0] = create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.5f, 0.4f, 0.3f, 1.0f);
+  pal[1] = create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.2f, 0.6f, 0.8f, 1.0f);
+  pal[2] = create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.9f, 0.1f, 0.5f, 1.0f);
+  Splat4D orig[3];
+  memcpy(orig, pal, sizeof orig);
+
+  if (!splat_convert_palette_colors(pal, 3, SPLAT_COLOR_SRGB, SPLAT_COLOR_REC2020))
+    return false;
+  bool changed = memcmp(orig, pal, sizeof orig) != 0;
+  if (!splat_convert_palette_colors(pal, 3, SPLAT_COLOR_REC2020, SPLAT_COLOR_SRGB))
+    return false;
+
+  float maxerr = 0.0f;
+  for (int i = 0; i < 3; ++i) {
+    float e = abs_diff(pal[i].r, orig[i].r);
+    if (e > maxerr)
+      maxerr = e;
+    e = abs_diff(pal[i].g, orig[i].g);
+    if (e > maxerr)
+      maxerr = e;
+    e = abs_diff(pal[i].b, orig[i].b);
+    if (e > maxerr)
+      maxerr = e;
+  }
+  return changed && maxerr < 1e-3f;
+}
+
+static bool test_color_convert_identity(void) {
+  Splat4D pal[1] = {create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.3f, 0.4f, 0.5f, 1.0f)};
+  Splat4D orig = pal[0];
+  if (!splat_convert_palette_colors(pal, 1, SPLAT_COLOR_SRGB, SPLAT_COLOR_SRGB))
+    return false;
+  return memcmp(&orig, &pal[0], sizeof orig) == 0;
+}
+
+static bool test_color_convert_rejects_unsupported(void) {
+  // OKLab is not modeled by the lcms backend and must be refused.
+  Splat4D pal[1] = {create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.3f, 0.4f, 0.5f, 1.0f)};
+  return !splat_convert_palette_colors(pal, 1, SPLAT_COLOR_SRGB, SPLAT_COLOR_OKLAB);
+}
+#endif // SPLAT_WITH_LCMS2
+
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
@@ -1043,6 +1182,14 @@ static test_case TESTS[] = {
     {"half_conversion_exact_values", test_half_conversion_exact_values},
     {"round_trip_float64_palette", test_round_trip_float64_palette},
     {"round_trip_float16_palette", test_round_trip_float16_palette},
+    {"rle_unit_roundtrip", test_rle_unit_roundtrip},
+    {"round_trip_all_available_codecs", test_round_trip_all_available_codecs},
+    {"read_video_rejects_unavailable_codec", test_read_video_rejects_unavailable_codec},
+#ifdef SPLAT_WITH_LCMS2
+    {"color_convert_round_trip", test_color_convert_round_trip},
+    {"color_convert_identity", test_color_convert_identity},
+    {"color_convert_rejects_unsupported", test_color_convert_rejects_unsupported},
+#endif
 };
 
 int main(void) {
