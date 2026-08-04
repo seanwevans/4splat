@@ -791,6 +791,110 @@ static bool test_stream_splat4DVideo_stops_on_consumer_error(void) {
   return !ok && ctx.call_count == 1;
 }
 
+// Round-trip a 2x2x1x1 / 2-entry video whose header carries `flags`, reporting
+// whether the header and index survived write -> read unchanged.
+static bool round_trip_with_flags(uint32_t flags, bool *headers_match, bool *index_match) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DHeader header = create_splat4DHeader(/*width=*/2, /*height=*/2, /*depth=*/1,
+                                              /*frames=*/1, /*pSize=*/2, flags);
+  Splat4DVideo original = create_splat4DVideo(header, palette, indices);
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  if (!write_splat4DVideo(fp, &original)) {
+    fclose(fp);
+    return false;
+  }
+  rewind(fp);
+  Splat4DVideo loaded;
+  bool ok = read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  if (!ok)
+    return false;
+
+  *headers_match = memcmp(&original.header, &loaded.header, sizeof(Splat4DHeader)) == 0;
+  *index_match = memcmp(original.index.index, loaded.index.index,
+                        header_total_indices(&original.header) * sizeof(uint64_t)) == 0;
+  free_splat4DVideo(&loaded);
+  return true;
+}
+
+static bool test_round_trip_index_width(void) {
+  const uint32_t widths[] = {SPLAT_INDEX_WIDTH_8, SPLAT_INDEX_WIDTH_16, SPLAT_INDEX_WIDTH_32,
+                             SPLAT_INDEX_WIDTH_64};
+  for (size_t i = 0; i < ARRAY_SIZE(widths); ++i) {
+    uint32_t flags = SPLAT_FLAG_PRECISION_FLOAT32 | (widths[i] << SPLAT_FLAG_INDEX_WIDTH_SHIFT);
+    bool headers_match = false, index_match = false;
+    if (!round_trip_with_flags(flags, &headers_match, &index_match))
+      return false;
+    if (!headers_match || !index_match)
+      return false;
+  }
+  return true;
+}
+
+static bool test_round_trip_preserves_descriptive_flags(void) {
+  uint32_t flags = SPLAT_FLAG_PRECISION_FLOAT32 | SPLAT_FLAG_SORTED |
+                   (SPLAT_SHAPE_AXIS_ALIGNED << SPLAT_FLAG_SPLAT_SHAPE_SHIFT) |
+                   (SPLAT_COLOR_OKLAB << SPLAT_FLAG_COLOR_SPACE_SHIFT) |
+                   (SPLAT_INTERP_LANCZOS << SPLAT_FLAG_INTERP_SHIFT) |
+                   (0xABu << SPLAT_FLAG_METADATA_SHIFT);
+  bool headers_match = false, index_match = false;
+  if (!round_trip_with_flags(flags, &headers_match, &index_match))
+    return false;
+  return headers_match && index_match;
+}
+
+static bool test_read_video_rejects_reserved_splat_shape(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+  video.header.flags |= (SPLAT_SHAPE_RESERVED << SPLAT_FLAG_SPLAT_SHAPE_SHIFT);
+  video.footer.checksum = compute_video_checksum(&video);
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  if (!write_splat4DVideo(fp, &video)) {
+    fclose(fp);
+    return false;
+  }
+  rewind(fp);
+  Splat4DVideo loaded;
+  bool ok = !read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  return ok;
+}
+
+static bool test_read_video_rejects_encryption(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
+  video.header.flags |= (1u << SPLAT_FLAG_ENCRYPTION_SHIFT);
+  video.footer.checksum = compute_video_checksum(&video);
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  if (!write_splat4DVideo(fp, &video)) {
+    fclose(fp);
+    return false;
+  }
+  rewind(fp);
+  Splat4DVideo loaded;
+  bool ok = !read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  return ok;
+}
+
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
@@ -846,6 +950,10 @@ static test_case TESTS[] = {
     {"stream_splat4DVideo_rejects_null", test_stream_splat4DVideo_rejects_null},
     {"stream_splat4DVideo_stops_on_consumer_error",
      test_stream_splat4DVideo_stops_on_consumer_error},
+    {"round_trip_index_width", test_round_trip_index_width},
+    {"round_trip_preserves_descriptive_flags", test_round_trip_preserves_descriptive_flags},
+    {"read_video_rejects_reserved_splat_shape", test_read_video_rejects_reserved_splat_shape},
+    {"read_video_rejects_encryption", test_read_video_rejects_encryption},
 };
 
 int main(void) {
