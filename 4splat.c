@@ -2772,25 +2772,27 @@ static uint32_t splat_median_cut(const uint32_t *colors, const double *counts, u
   return nboxes;
 }
 
-// Build a video from `nframes` tightly packed w*h RGB8 frames that share one
-// global palette (the format's core model; a single image is just nframes == 1,
-// collapsing to a pseudo-GIF). Each palette color becomes a splat whose spatial
-// mu/sigma come from the (x, y) spread of the pixels using it and whose temporal
-// mu_t/sigma_t come from the frame indices; indices are stored t-major then
-// row-major within a frame. With max_colors == 0 the palette is exact
-// (lossless); a positive max_colors quantizes to at most that many colors via
-// median cut (lossy). On success *out owns freshly allocated palette/index.
-bool frames_to_video_quantized(const uint8_t *const *frames, uint32_t nframes, uint32_t w,
-                               uint32_t h, uint32_t max_colors, Splat4DVideo *out) {
-  if (!frames || !out || nframes == 0 || w == 0 || h == 0)
+// Build a video from `depth * frames` tightly packed w*h RGB8 slices that share
+// one global palette (the format's core 4D model). Slices are supplied in
+// t-major, z-minor order (slice index s = t*depth + z), matching the on-disk
+// index order t -> z -> y -> x. Each palette color becomes a splat whose spatial
+// mu/sigma come from the (x, y) spread of its pixels, and whose mu_z/sigma_t and
+// mu_t/sigma_t come from the z (depth) and t (frame) positions it occupies. With
+// max_colors == 0 the palette is exact (lossless); a positive max_colors
+// quantizes to at most that many colors via median cut (lossy). On success *out
+// owns freshly allocated palette/index.
+bool stack_to_video_quantized(const uint8_t *const *slices, uint32_t depth, uint32_t frames,
+                              uint32_t w, uint32_t h, uint32_t max_colors, Splat4DVideo *out) {
+  if (!slices || !out || depth == 0 || frames == 0 || w == 0 || h == 0)
     return false;
-  for (uint32_t t = 0; t < nframes; ++t)
-    if (!frames[t])
+  uint64_t nslices = (uint64_t)depth * (uint64_t)frames;
+  for (uint64_t s = 0; s < nslices; ++s)
+    if (!slices[s])
       return false;
 
   uint64_t npix = (uint64_t)w * (uint64_t)h;
   uint64_t total = 0;
-  if (!checked_mul_u64(npix, nframes, &total) || total > SIZE_MAX / sizeof(uint64_t))
+  if (!checked_mul_u64(npix, nslices, &total) || total > SIZE_MAX / sizeof(uint64_t))
     return false;
 
   uint64_t *index = malloc((size_t)total * sizeof(uint64_t));
@@ -2810,8 +2812,8 @@ bool frames_to_video_quantized(const uint8_t *const *frames, uint32_t nframes, u
   size_t pal_cap = 0, pal_n = 0;
   bool ok = true;
 
-  for (uint32_t t = 0; t < nframes && ok; ++t) {
-    const uint8_t *rgb = frames[t];
+  for (uint64_t s = 0; s < nslices && ok; ++s) {
+    const uint8_t *rgb = slices[s];
     for (uint64_t i = 0; i < npix && ok; ++i) {
       uint32_t color =
           ((uint32_t)rgb[i * 3] << 16) | ((uint32_t)rgb[i * 3 + 1] << 8) | (uint32_t)rgb[i * 3 + 2];
@@ -2844,7 +2846,7 @@ bool frames_to_video_quantized(const uint8_t *const *frames, uint32_t nframes, u
         colormap_put(&map, color, idx);
       }
       counts[idx] += 1.0;
-      index[(uint64_t)t * npix + i] = idx;
+      index[s * npix + i] = idx;
     }
   }
   colormap_free(&map);
@@ -2889,21 +2891,25 @@ bool frames_to_video_quantized(const uint8_t *const *frames, uint32_t nframes, u
   }
   free(counts);
 
-  // Accumulate spatial/temporal statistics per final palette entry.
+  // Accumulate spatial/depth/temporal statistics per final palette entry.
   double *cnt = calloc(final_n, sizeof(double));
   double *sx = calloc(final_n, sizeof(double));
   double *sy = calloc(final_n, sizeof(double));
   double *sxx = calloc(final_n, sizeof(double));
   double *syy = calloc(final_n, sizeof(double));
+  double *sz = calloc(final_n, sizeof(double));
+  double *szz = calloc(final_n, sizeof(double));
   double *st = calloc(final_n, sizeof(double));
   double *stt = calloc(final_n, sizeof(double));
   Splat4D *palette = malloc((size_t)final_n * sizeof(Splat4D));
-  if (!cnt || !sx || !sy || !sxx || !syy || !st || !stt || !palette) {
+  if (!cnt || !sx || !sy || !sxx || !syy || !sz || !szz || !st || !stt || !palette) {
     free(cnt);
     free(sx);
     free(sy);
     free(sxx);
     free(syy);
+    free(sz);
+    free(szz);
     free(st);
     free(stt);
     free(palette);
@@ -2916,15 +2922,18 @@ bool frames_to_video_quantized(const uint8_t *const *frames, uint32_t nframes, u
     return false;
   }
 
-  for (uint32_t t = 0; t < nframes; ++t) {
+  for (uint64_t s = 0; s < nslices; ++s) {
+    double zz = (double)(s % depth), tt = (double)(s / depth);
     for (uint64_t i = 0; i < npix; ++i) {
-      uint64_t j = index[(uint64_t)t * npix + i];
-      double x = (double)(i % w), y = (double)(i / w), tt = (double)t;
+      uint64_t j = index[s * npix + i];
+      double x = (double)(i % w), y = (double)(i / w);
       cnt[j] += 1.0;
       sx[j] += x;
       sy[j] += y;
       sxx[j] += x * x;
       syy[j] += y * y;
+      sz[j] += zz;
+      szz[j] += zz * zz;
       st[j] += tt;
       stt[j] += tt * tt;
     }
@@ -2932,15 +2941,16 @@ bool frames_to_video_quantized(const uint8_t *const *frames, uint32_t nframes, u
 
   for (uint32_t j = 0; j < final_n; ++j) {
     double n = cnt[j] > 0 ? cnt[j] : 1.0;
-    double mx = sx[j] / n, my = sy[j] / n, mt = st[j] / n;
+    double mx = sx[j] / n, my = sy[j] / n, mz = sz[j] / n, mt = st[j] / n;
     double vx = sxx[j] / n - mx * mx;
     double vy = syy[j] / n - my * my;
+    double vz = szz[j] / n - mz * mz;
     double vt = stt[j] / n - mt * mt;
     uint32_t c = rep[j];
-    palette[j] =
-        create_splat4D((float)mx, (float)splat_sqrt(vx), (float)my, (float)splat_sqrt(vy), 0.0f,
-                       0.0f, (float)mt, (float)splat_sqrt(vt), (float)((c >> 16) & 0xFF) / 255.0f,
-                       (float)((c >> 8) & 0xFF) / 255.0f, (float)(c & 0xFF) / 255.0f, 1.0f);
+    palette[j] = create_splat4D(
+        (float)mx, (float)splat_sqrt(vx), (float)my, (float)splat_sqrt(vy), (float)mz,
+        (float)splat_sqrt(vz), (float)mt, (float)splat_sqrt(vt), (float)((c >> 16) & 0xFF) / 255.0f,
+        (float)((c >> 8) & 0xFF) / 255.0f, (float)(c & 0xFF) / 255.0f, 1.0f);
   }
 
   free(cnt);
@@ -2948,6 +2958,8 @@ bool frames_to_video_quantized(const uint8_t *const *frames, uint32_t nframes, u
   free(sy);
   free(sxx);
   free(syy);
+  free(sz);
+  free(szz);
   free(st);
   free(stt);
   if (quant_of) {
@@ -2961,9 +2973,15 @@ bool frames_to_video_quantized(const uint8_t *const *frames, uint32_t nframes, u
                                      : SPLAT_INDEX_WIDTH_32;
   uint32_t flags = SPLAT_FLAG_PRECISION_FLOAT32 | (iw << SPLAT_FLAG_INDEX_WIDTH_SHIFT) |
                    (SPLAT_SHAPE_AXIS_ALIGNED << SPLAT_FLAG_SPLAT_SHAPE_SHIFT);
-  Splat4DHeader header = create_splat4DHeader(w, h, 1, nframes, final_n, flags);
+  Splat4DHeader header = create_splat4DHeader(w, h, depth, frames, final_n, flags);
   *out = create_splat4DVideo(header, palette, index);
   return true;
+}
+
+// A stack of frames (depth == 1) is the video case of the general codec.
+bool frames_to_video_quantized(const uint8_t *const *frames, uint32_t nframes, uint32_t w,
+                               uint32_t h, uint32_t max_colors, Splat4DVideo *out) {
+  return stack_to_video_quantized(frames, 1, nframes, w, h, max_colors, out);
 }
 
 // Lossless: one palette entry per distinct color across all frames.
@@ -3024,62 +3042,69 @@ bool video_to_image(const Splat4DVideo *v, uint8_t **rgb_out, uint32_t *w_out, u
   return true;
 }
 
-// Reconstruct every frame of a video (depth must be 1). On success *frames_out
-// is an array of nframes freshly allocated w*h*3 RGB8 buffers; the caller frees
-// each buffer and then the array.
-bool video_to_frames(const Splat4DVideo *v, uint8_t ***frames_out, uint32_t *nframes_out,
+// Reconstruct every slice of a video/volume. On success *slices_out is an array
+// of depth*frames freshly allocated w*h*3 RGB8 buffers in t-major, z-minor order;
+// the caller frees each buffer and then the array.
+bool video_to_slices(const Splat4DVideo *v, uint8_t ***slices_out, uint32_t *nslices_out,
                      uint32_t *w_out, uint32_t *h_out) {
-  if (!v || !frames_out || !v->palette.palette || !v->index.index)
+  if (!v || !slices_out || !v->palette.palette || !v->index.index)
     return false;
-  if (v->header.depth != 1) {
-    LOG_ERROR("❌ Video decode requires depth = 1\n");
-    return false;
-  }
-  uint32_t w = v->header.width, h = v->header.height, nframes = v->header.frames;
+  uint32_t w = v->header.width, h = v->header.height;
+  uint64_t nslices = (uint64_t)v->header.depth * (uint64_t)v->header.frames;
   uint64_t npix = (uint64_t)w * (uint64_t)h;
-  if (npix == 0 || npix > SIZE_MAX / 3 || nframes == 0)
+  if (npix == 0 || npix > SIZE_MAX / 3 || nslices == 0 || nslices > SIZE_MAX / sizeof(uint8_t *))
     return false;
 
-  uint8_t **frames = calloc(nframes, sizeof(uint8_t *));
-  if (!frames)
+  uint8_t **slices = calloc((size_t)nslices, sizeof(uint8_t *));
+  if (!slices)
     return false;
 
   bool ok = true;
-  for (uint32_t t = 0; t < nframes && ok; ++t) {
+  for (uint64_t s = 0; s < nslices && ok; ++s) {
     uint8_t *rgb = malloc((size_t)npix * 3);
     if (!rgb) {
       ok = false;
       break;
     }
-    frames[t] = rgb;
+    slices[s] = rgb;
     for (uint64_t i = 0; i < npix; ++i) {
-      uint64_t idx = v->index.index[(uint64_t)t * npix + i];
+      uint64_t idx = v->index.index[s * npix + i];
       if (idx >= v->header.pSize) {
         ok = false;
         break;
       }
-      const Splat4D *s = &v->palette.palette[idx];
-      rgb[i * 3] = splat_channel_to_u8(s->r);
-      rgb[i * 3 + 1] = splat_channel_to_u8(s->g);
-      rgb[i * 3 + 2] = splat_channel_to_u8(s->b);
+      const Splat4D *sp = &v->palette.palette[idx];
+      rgb[i * 3] = splat_channel_to_u8(sp->r);
+      rgb[i * 3 + 1] = splat_channel_to_u8(sp->g);
+      rgb[i * 3 + 2] = splat_channel_to_u8(sp->b);
     }
   }
 
   if (!ok) {
-    for (uint32_t t = 0; t < nframes; ++t)
-      free(frames[t]);
-    free(frames);
+    for (uint64_t s = 0; s < nslices; ++s)
+      free(slices[s]);
+    free(slices);
     return false;
   }
 
-  *frames_out = frames;
-  if (nframes_out)
-    *nframes_out = nframes;
+  *slices_out = slices;
+  if (nslices_out)
+    *nslices_out = (uint32_t)nslices;
   if (w_out)
     *w_out = w;
   if (h_out)
     *h_out = h;
   return true;
+}
+
+// Reconstruct every frame of a video (depth must be 1).
+bool video_to_frames(const Splat4DVideo *v, uint8_t ***frames_out, uint32_t *nframes_out,
+                     uint32_t *w_out, uint32_t *h_out) {
+  if (v && v->header.depth != 1) {
+    LOG_ERROR("❌ Video decode requires depth = 1\n");
+    return false;
+  }
+  return video_to_slices(v, frames_out, nframes_out, w_out, h_out);
 }
 
 #ifndef UNIT_TEST
@@ -3121,7 +3146,9 @@ static void print_usage(FILE *stream) {
           "  4splat encode-image [--compress <scheme>] [--colors <N>] <in.ppm> <out.4spl>\n"
           "  4splat decode-image <in.4spl> <out.ppm>\n"
           "  4splat encode-video [--compress <scheme>] [--colors <N>] <out.4spl> <frame.ppm>...\n"
-          "  4splat decode-video <in.4spl> <out-prefix>   (writes <prefix>NNNN.ppm)\n");
+          "  4splat decode-video <in.4spl> <out-prefix>   (writes <prefix>NNNN.ppm)\n"
+          "  4splat encode-volume [--compress <scheme>] [--colors <N>] <out.4spl> <slice.ppm>...\n"
+          "  4splat decode-volume <in.4spl> <out-prefix>   (writes <prefix>NNNN.ppm)\n");
 }
 
 // Parse a color-space name (as used on the command line) into its flag value.
@@ -3994,6 +4021,115 @@ static int command_decode_video(int argc, char **argv) {
   return EXIT_SUCCESS;
 }
 
+static int command_encode_volume(int argc, char **argv) {
+  uint32_t codec = 0, max_colors = 0;
+  int a = parse_encode_options(argc, argv, &codec, &max_colors);
+  if (a < 0)
+    return EXIT_FAILURE;
+  if (argc - a < 2) {
+    LOG_ERROR("❌ Usage: 4splat encode-volume [--compress <scheme>] [--colors <N>] "
+              "<out.4spl> <slice.ppm>...\n");
+    return EXIT_FAILURE;
+  }
+  const char *out_path = argv[a++];
+  uint32_t depth = (uint32_t)(argc - a);
+
+  uint8_t **slices = calloc(depth, sizeof(uint8_t *));
+  if (!slices)
+    return EXIT_FAILURE;
+
+  uint32_t w = 0, h = 0;
+  bool ok = true;
+  for (uint32_t z = 0; z < depth; ++z) {
+    uint32_t fw = 0, fh = 0;
+    slices[z] = read_ppm(argv[a + z], &fw, &fh);
+    if (!slices[z]) {
+      ok = false;
+      break;
+    }
+    if (z == 0) {
+      w = fw;
+      h = fh;
+    } else if (fw != w || fh != h) {
+      LOG_ERROR("❌ Slice '%s' is %ux%u; expected %ux%u\n", argv[a + z], fw, fh, w, h);
+      ok = false;
+      break;
+    }
+  }
+
+  Splat4DVideo video;
+  bool built = ok && stack_to_video_quantized((const uint8_t *const *)slices, depth, 1, w, h,
+                                              max_colors, &video);
+  for (uint32_t z = 0; z < depth; ++z)
+    free(slices[z]);
+  free(slices);
+  if (!built) {
+    if (ok)
+      LOG_ERROR("❌ Failed to build 4Splat volume from slices\n");
+    return EXIT_FAILURE;
+  }
+  if (codec != SPLAT_COMPRESSION_NONE)
+    set_flag_field(&video.header.flags, SPLAT_FLAG_COMPRESSION_MASK, SPLAT_FLAG_COMPRESSION_SHIFT,
+                   codec);
+
+  FILE *fp = fopen(out_path, "wb");
+  if (!fp) {
+    LOG_ERROR("❌ Unable to create '%s': %s\n", out_path, strerror(errno));
+    free_splat4DVideo(&video);
+    return EXIT_FAILURE;
+  }
+  bool wrote = write_splat4DVideo(fp, &video);
+  fclose(fp);
+  printf("✅ Encoded %u slice(s) %ux%u (%u colors) to '%s'\n", depth, w, h, video.header.pSize,
+         out_path);
+  free_splat4DVideo(&video);
+  return wrote ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+static int command_decode_volume(int argc, char **argv) {
+  if (argc != 2) {
+    LOG_ERROR("❌ Usage: 4splat decode-volume <in.4spl> <out-prefix>\n");
+    return EXIT_FAILURE;
+  }
+  FILE *fp = fopen(argv[0], "rb");
+  if (!fp) {
+    LOG_ERROR("❌ Unable to open '%s': %s\n", argv[0], strerror(errno));
+    return EXIT_FAILURE;
+  }
+  Splat4DVideo video;
+  bool read_ok = read_splat4DVideo(fp, &video);
+  fclose(fp);
+  if (!read_ok) {
+    LOG_ERROR("❌ Failed to read '%s'\n", argv[0]);
+    return EXIT_FAILURE;
+  }
+
+  uint8_t **slices = NULL;
+  uint32_t nslices = 0, w = 0, h = 0;
+  bool ok = video_to_slices(&video, &slices, &nslices, &w, &h);
+  free_splat4DVideo(&video);
+  if (!ok)
+    return EXIT_FAILURE;
+
+  bool wrote = true;
+  for (uint32_t s = 0; s < nslices && wrote; ++s) {
+    char path[4096];
+    SAFE_SNPRINTF(path, sizeof path, "%s%04u.ppm", argv[1], s);
+    wrote = write_ppm(path, slices[s], w, h);
+    if (!wrote)
+      LOG_ERROR("❌ Failed to write '%s'\n", path);
+  }
+  for (uint32_t s = 0; s < nslices; ++s)
+    free(slices[s]);
+  free(slices);
+  if (!wrote)
+    return EXIT_FAILURE;
+
+  printf("✅ Decoded '%s' to %u slice(s) %ux%u ('%s0000.ppm'...)\n", argv[0], nslices, w, h,
+         argv[1]);
+  return EXIT_SUCCESS;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     print_usage(stderr);
@@ -4018,6 +4154,12 @@ int main(int argc, char **argv) {
   }
   if (strcmp(command, "decode-video") == 0) {
     return command_decode_video(argc - 2, argv + 2);
+  }
+  if (strcmp(command, "encode-volume") == 0) {
+    return command_encode_volume(argc - 2, argv + 2);
+  }
+  if (strcmp(command, "decode-volume") == 0) {
+    return command_decode_volume(argc - 2, argv + 2);
   }
 
   print_usage(stderr);
