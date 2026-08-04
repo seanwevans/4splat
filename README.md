@@ -272,19 +272,23 @@ pseudo-GIF — and shares the same code path.
 
 ```bash
 # image (one frame)
-4splat encode-image input.ppm output.4spl [compression]
+4splat encode-image [--compress <scheme>] [--colors <N>] input.ppm output.4spl
 4splat decode-image output.4spl restored.ppm
 
 # video (frames share one palette)
-4splat encode-video [--compress <scheme>] out.4spl frame0.ppm frame1.ppm ...
+4splat encode-video [--compress <scheme>] [--colors <N>] out.4spl frame0.ppm frame1.ppm ...
 4splat decode-video out.4spl restored_        # writes restored_0000.ppm, ...
 ```
 
 Input/output is binary PPM (`P6`, maxval 255); all frames must share dimensions.
-An optional compression scheme (e.g. `zstd`, `rle`) compresses the index — a
-2-color checkerboard shrinks from a 30 KB PPM to a few hundred bytes, and a
-4-frame clip with two colors packs into one tiny file, both decoding back
-bit-for-bit.
+`--compress` (e.g. `zstd`, `rle`) compresses the index — a 2-color checkerboard
+shrinks from a 30 KB PPM to a few hundred bytes, decoding back bit-for-bit.
+
+Without `--colors` the palette is **exact and lossless** (one entry per distinct
+color). `--colors N` runs **median-cut quantization** down to at most `N`
+colors — lossy, but it makes photographic content compress: a 1024-color
+gradient at `--colors 16` drops from ~51 KB to ~1.8 KB. Quantization is shared
+across all frames, so it acts as a global palette for the whole clip.
 
 ## Color-space conversion
 
