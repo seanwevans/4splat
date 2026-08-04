@@ -87,3 +87,27 @@ jobs:
         run: make CC=${{ matrix.compiler }}
       - name: Build and run full-featured tests
         run: make CC=${{ matrix.compiler }} test
+
+  fuzz-smoke:
+    name: Parser fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build standalone harness (ASan + UBSan)
+        run: make fuzz-standalone
+      - name: Run over seed corpus and random/mutated inputs
+        run: |
+          set -e
+          mkdir -p rnd
+          python3 - <<'PY'
+          import os, random, struct
+          random.seed(1)
+          for i in range(3000):
+              open(f'rnd/{i}', 'wb').write(bytes(random.randrange(256)
+                                                 for _ in range(random.randrange(0, 400))))
+          seed = bytearray(open('tests/fuzz_corpus/valid.4spl', 'rb').read())
+          for off in (8, 12, 16, 20, 24, 28):  # width/height/depth/frames/pSize/flags
+              m = bytearray(seed); struct.pack_into('<I', m, off, 0xFFFFFFFF)
+              open(f'rnd/mut{off}', 'wb').write(m)
+          PY
+          ASAN_OPTIONS=allocator_may_return_null=1 ./tests/fuzz_read tests/fuzz_corpus/* rnd/*

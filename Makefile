@@ -16,7 +16,7 @@ CFLAGS ?= -Wall -Wpedantic -std=c11 -O2
 FEATURES ?= -DSPLAT_WITH_ALL
 LIBS ?= -lz -lbz2 -llzma -lbrotlienc -lbrotlidec -lzstd -llz4 -llcms2 -lm
 
-.PHONY: all plain test test-plain clean
+.PHONY: all plain test test-plain fuzz fuzz-standalone clean
 
 all: 4splat
 
@@ -34,5 +34,17 @@ test-plain: tests/test_4splat.c 4splat.c
 	$(CC) $(CFLAGS) -DUNIT_TEST tests/test_4splat.c -o tests/test_4splat
 	./tests/test_4splat
 
+# Fuzz the reader with libFuzzer (needs clang and its fuzzer runtime):
+#   make fuzz && ./tests/fuzz_read tests/fuzz_corpus
+fuzz: tests/fuzz_read.c 4splat.c
+	clang $(CFLAGS) -DUNIT_TEST -fsanitize=fuzzer,address,undefined tests/fuzz_read.c -o tests/fuzz_read
+
+# Portable standalone runner (no libFuzzer runtime): feeds each file argument
+# through the same entry point, under ASan/UBSan.
+#   make fuzz-standalone && ./tests/fuzz_read tests/fuzz_corpus/* corpus/*
+fuzz-standalone: tests/fuzz_read.c 4splat.c
+	$(CC) $(CFLAGS) -DUNIT_TEST -DSPLAT_FUZZ_STANDALONE -fsanitize=address,undefined \
+		tests/fuzz_read.c -o tests/fuzz_read
+
 clean:
-	rm -f 4splat tests/test_4splat
+	rm -f 4splat tests/test_4splat tests/fuzz_read

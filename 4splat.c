@@ -641,6 +641,10 @@ uint64_t header_total_indices(const Splat4DHeader *h);
 #define SPLAT_HEADER_DISK_BYTES 32
 #define SPLAT_FOOTER_DISK_BYTES 16
 
+// Upper bound on the decompressed index size accepted from a compressed file,
+// so a tiny "decompression bomb" header cannot force a huge allocation.
+#define SPLAT_MAX_COMPRESSED_INDEX_BYTES ((uint64_t)1 << 31) // 2 GiB
+
 static void store_u32le(uint8_t *p, uint32_t v) {
   p[0] = (uint8_t)v;
   p[1] = (uint8_t)(v >> 8);
@@ -2437,6 +2441,11 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
   if (!fp || !v)
     return false;
 
+  // Null the owned pointers up front so every early-return path leaves the
+  // caller's struct in a consistent (freeable) state.
+  v->palette.palette = NULL;
+  v->index.index = NULL;
+
   // Read header
   if (!read_splat4DHeader(fp, &v->header))
     return false;
@@ -2479,12 +2488,44 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
     return false;
   }
 
+  uint32_t codec = (v->header.flags & SPLAT_FLAG_COMPRESSION_MASK) >> SPLAT_FLAG_COMPRESSION_SHIFT;
+
+  // Reject headers whose declared sections cannot fit the actual file, before
+  // allocating anything sized from those (attacker-controlled) dimensions.
+  long after_header = ftell(fp);
+  if (after_header < 0 || fseek(fp, 0, SEEK_END) != 0)
+    return false;
+  long file_end = ftell(fp);
+  if (file_end < 0 || fseek(fp, after_header, SEEK_SET) != 0)
+    return false;
+  uint64_t filesize = (uint64_t)file_end;
+
+  uint64_t base = (uint64_t)SPLAT_HEADER_DISK_BYTES + SPLAT_FOOTER_DISK_BYTES;
+  if (palette_bytes > filesize || filesize - palette_bytes < base) {
+    LOG_ERROR("❌ Palette does not fit the file\n");
+    return false;
+  }
+  uint64_t index_room = filesize - palette_bytes - base; // on-disk bytes for the index
+  uint64_t ondisk_index = 0;
+  if (!checked_mul_u64(total, (uint64_t)get_index_width_bytes(v->header.flags), &ondisk_index)) {
+    LOG_ERROR("❌ Invalid index count\n");
+    return false;
+  }
+  if (codec == SPLAT_COMPRESSION_NONE) {
+    if (ondisk_index > index_room) {
+      LOG_ERROR("❌ Index does not fit the file\n");
+      return false;
+    }
+  } else if (ondisk_index > SPLAT_MAX_COMPRESSED_INDEX_BYTES) {
+    LOG_ERROR("❌ Compressed index would decompress beyond the size limit\n");
+    return false;
+  }
+
   // Read palette
   if (!read_splat4DPalette(fp, &v->palette, v->header.pSize, v->header.flags))
     return false;
 
   // Read index
-  uint32_t codec = (v->header.flags & SPLAT_FLAG_COMPRESSION_MASK) >> SPLAT_FLAG_COMPRESSION_SHIFT;
   if (codec == SPLAT_COMPRESSION_NONE) {
     if (!read_splat4DIndex(fp, &v->index, total, v->header.flags)) {
       free(v->palette.palette);
