@@ -258,21 +258,33 @@ for each flag field:
 with a clear message rather than producing an unreadable file. A raw `--flags`
 value is still accepted and individual named options override their field.
 
-## Image codec
+## Image & video codec
 
-A lossless image path maps a 2D RGB image onto the format directly: each
-distinct color becomes a palette splat (its `r/g/b`, with `mu`/`sigma` set from
-the spatial spread of the pixels that use it) and every pixel stores the index
-of its color. 8-bit RGB round-trips exactly.
+The format is a video codec with a **global palette shared across all frames**
+(the same model as an animated GIF's global color table). Each distinct color
+across every frame becomes a palette splat — its `r/g/b`, with spatial
+`mu`/`sigma` from the pixels that use it and temporal `mu_t`/`sigma_t` from the
+frames it appears in — and every pixel stores the index of its color, in
+`t`-major then row-major order. 8-bit RGB round-trips exactly.
+
+A single image is simply the `frames == 1` collapse of the video codec — a
+pseudo-GIF — and shares the same code path.
 
 ```bash
+# image (one frame)
 4splat encode-image input.ppm output.4spl [compression]
 4splat decode-image output.4spl restored.ppm
+
+# video (frames share one palette)
+4splat encode-video [--compress <scheme>] out.4spl frame0.ppm frame1.ppm ...
+4splat decode-video out.4spl restored_        # writes restored_0000.ppm, ...
 ```
 
-Input/output is binary PPM (`P6`, maxval 255). An optional compression scheme
-(e.g. `zstd`, `rle`) compresses the index — a 2-color checkerboard shrinks from
-a 30 KB PPM to a few hundred bytes while decoding back bit-for-bit.
+Input/output is binary PPM (`P6`, maxval 255); all frames must share dimensions.
+An optional compression scheme (e.g. `zstd`, `rle`) compresses the index — a
+2-color checkerboard shrinks from a 30 KB PPM to a few hundred bytes, and a
+4-frame clip with two colors packs into one tiny file, both decoding back
+bit-for-bit.
 
 ## Color-space conversion
 
