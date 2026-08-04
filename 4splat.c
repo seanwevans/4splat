@@ -204,6 +204,7 @@
 #endif
 #ifdef SPLAT_WITH_LCMS2
 #include <lcms2.h>
+#include <math.h> // OKLab transform (powf/cbrtf)
 #endif
 
 #define LOG_ERROR(...) fprintf(stderr, __VA_ARGS__)
@@ -1232,11 +1233,10 @@ static bool splat_space_profile(uint32_t space, cmsHPROFILE *profile, cmsUInt32N
 
 // Convert every palette entry's (r, g, b) from `from` to `to`. Non-RGB targets
 // (Lab, XYZ) leave their channel values in the r/g/b slots.
-static bool splat_convert_palette_colors(Splat4D *palette, uint32_t count, uint32_t from,
-                                         uint32_t to) {
+// Convert the palette between two lcms-modeled spaces (neither OKLab).
+static bool lcms_convert_palette(Splat4D *palette, uint32_t count, uint32_t from, uint32_t to) {
   if (from == to)
     return true;
-
   cmsHPROFILE in_profile = NULL, out_profile = NULL;
   cmsUInt32Number in_format = 0, out_format = 0;
   if (!splat_space_profile(from, &in_profile, &in_format)) {
@@ -1268,6 +1268,71 @@ static bool splat_convert_palette_colors(Splat4D *palette, uint32_t count, uint3
     palette[i].b = out[2];
   }
   cmsDeleteTransform(xform);
+  return true;
+}
+
+// OKLab (Björn Ottosson, 2020) <-> sRGB, per the reference formulae.
+static float srgb_to_linear(float c) {
+  return c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f);
+}
+static float linear_to_srgb(float c) {
+  return c <= 0.0031308f ? 12.92f * c : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
+}
+
+static void oklab_from_srgb(Splat4D *p) {
+  float r = srgb_to_linear(p->r), g = srgb_to_linear(p->g), b = srgb_to_linear(p->b);
+  float l = 0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b;
+  float m = 0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b;
+  float s = 0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b;
+  float l_ = cbrtf(l), m_ = cbrtf(m), s_ = cbrtf(s);
+  p->r = 0.2104542553f * l_ + 0.7936177850f * m_ - 0.0040720468f * s_; // L
+  p->g = 1.9779984951f * l_ - 2.4285922050f * m_ + 0.4505937099f * s_; // a
+  p->b = 0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_; // b
+}
+
+static void srgb_from_oklab(Splat4D *p) {
+  float L = p->r, A = p->g, B = p->b;
+  float l_ = L + 0.3963377774f * A + 0.2158037573f * B;
+  float m_ = L - 0.1055613458f * A - 0.0638541728f * B;
+  float s_ = L - 0.0894841775f * A - 1.2914855480f * B;
+  float l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+  float r = +4.0767416621f * l - 3.3077115913f * m + 0.2309699292f * s;
+  float g = -1.2684380046f * l + 2.6097574011f * m - 0.3413193965f * s;
+  float b = -0.0041960863f * l - 0.7034186147f * m + 1.7076147010f * s;
+  p->r = linear_to_srgb(r);
+  p->g = linear_to_srgb(g);
+  p->b = linear_to_srgb(b);
+}
+
+// Convert the palette between color spaces. OKLab is handled directly (it is not
+// an ICC space); any other pair goes through LittleCMS. OKLab conversions pivot
+// through sRGB, so OKLab <-> any lcms-modeled space works too.
+static bool splat_convert_palette_colors(Splat4D *palette, uint32_t count, uint32_t from,
+                                         uint32_t to) {
+  if (from == to)
+    return true;
+
+  bool from_oklab = (from == SPLAT_COLOR_OKLAB), to_oklab = (to == SPLAT_COLOR_OKLAB);
+  if (!from_oklab && !to_oklab)
+    return lcms_convert_palette(palette, count, from, to);
+
+  // Step 1: bring the palette to sRGB.
+  if (from_oklab) {
+    for (uint32_t i = 0; i < count; ++i)
+      srgb_from_oklab(&palette[i]);
+  } else if (from != SPLAT_COLOR_SRGB) {
+    if (!lcms_convert_palette(palette, count, from, SPLAT_COLOR_SRGB))
+      return false;
+  }
+
+  // Step 2: sRGB to the target.
+  if (to_oklab) {
+    for (uint32_t i = 0; i < count; ++i)
+      oklab_from_srgb(&palette[i]);
+  } else if (to != SPLAT_COLOR_SRGB) {
+    if (!lcms_convert_palette(palette, count, SPLAT_COLOR_SRGB, to))
+      return false;
+  }
   return true;
 }
 #endif // SPLAT_WITH_LCMS2

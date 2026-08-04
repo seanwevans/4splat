@@ -1129,9 +1129,44 @@ static bool test_color_convert_identity(void) {
 }
 
 static bool test_color_convert_rejects_unsupported(void) {
-  // OKLab is not modeled by the lcms backend and must be refused.
+  // ACES AP0 has no profile in the backend and must be refused.
   Splat4D pal[1] = {create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.3f, 0.4f, 0.5f, 1.0f)};
-  return !splat_convert_palette_colors(pal, 1, SPLAT_COLOR_SRGB, SPLAT_COLOR_OKLAB);
+  return !splat_convert_palette_colors(pal, 1, SPLAT_COLOR_SRGB, SPLAT_COLOR_ACES_AP0);
+}
+
+static bool test_oklab_round_trip(void) {
+  Splat4D pal[3];
+  pal[0] = create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.5f, 0.4f, 0.3f, 1.0f);
+  pal[1] = create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.2f, 0.6f, 0.8f, 1.0f);
+  pal[2] = create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.9f, 0.1f, 0.5f, 1.0f);
+  Splat4D orig[3];
+  memcpy(orig, pal, sizeof orig);
+
+  if (!splat_convert_palette_colors(pal, 3, SPLAT_COLOR_SRGB, SPLAT_COLOR_OKLAB))
+    return false;
+  bool changed = memcmp(orig, pal, sizeof orig) != 0;
+  if (!splat_convert_palette_colors(pal, 3, SPLAT_COLOR_OKLAB, SPLAT_COLOR_SRGB))
+    return false;
+
+  float maxerr = 0.0f;
+  for (int i = 0; i < 3; ++i) {
+    float e = abs_diff(pal[i].r, orig[i].r);
+    if (e > maxerr)
+      maxerr = e;
+    e = abs_diff(pal[i].g, orig[i].g);
+    if (e > maxerr)
+      maxerr = e;
+    e = abs_diff(pal[i].b, orig[i].b);
+    if (e > maxerr)
+      maxerr = e;
+  }
+  return changed && maxerr < 1e-4f;
+}
+
+// OKLab pivots through sRGB, so OKLab -> an lcms-modeled space works too.
+static bool test_oklab_pivots_to_lcms_space(void) {
+  Splat4D pal[1] = {create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.4f, 0.5f, 0.6f, 1.0f)};
+  return splat_convert_palette_colors(pal, 1, SPLAT_COLOR_OKLAB, SPLAT_COLOR_REC2020);
 }
 #endif // SPLAT_WITH_LCMS2
 
@@ -1589,6 +1624,8 @@ static test_case TESTS[] = {
     {"read_video_rejects_unavailable_codec", test_read_video_rejects_unavailable_codec},
 #ifdef SPLAT_WITH_LCMS2
     {"color_convert_round_trip", test_color_convert_round_trip},
+    {"oklab_round_trip", test_oklab_round_trip},
+    {"oklab_pivots_to_lcms_space", test_oklab_pivots_to_lcms_space},
     {"color_convert_identity", test_color_convert_identity},
     {"color_convert_rejects_unsupported", test_color_convert_rejects_unsupported},
 #endif
