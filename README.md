@@ -233,6 +233,22 @@ for each flag field:
 with a clear message rather than producing an unreadable file. A raw `--flags`
 value is still accepted and individual named options override their field.
 
+## Image codec
+
+A lossless image path maps a 2D RGB image onto the format directly: each
+distinct color becomes a palette splat (its `r/g/b`, with `mu`/`sigma` set from
+the spatial spread of the pixels that use it) and every pixel stores the index
+of its color. 8-bit RGB round-trips exactly.
+
+```bash
+4splat encode-image input.ppm output.4spl [compression]
+4splat decode-image output.4spl restored.ppm
+```
+
+Input/output is binary PPM (`P6`, maxval 255). An optional compression scheme
+(e.g. `zstd`, `rle`) compresses the index — a 2-color checkerboard shrinks from
+a 30 KB PPM to a few hundred bytes while decoding back bit-for-bit.
+
 ## Color-space conversion
 
 When built with LittleCMS (`SPLAT_WITH_LCMS2`, included in `make`), `decode` can

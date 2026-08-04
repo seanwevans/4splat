@@ -2515,6 +2515,243 @@ void free_splat4DVideo(Splat4DVideo *v) {
   v->index.index = NULL;
 }
 
+// --- lossless image codec ---------------------------------------------------
+//
+// A 2D RGB image maps directly onto the format: each distinct color becomes a
+// palette splat (its r/g/b, with mu/sigma set from the spatial spread of the
+// pixels that use it), and every pixel stores the index of its color. Decoding
+// writes each pixel back from its palette color, so 8-bit RGB round-trips
+// exactly. Self-contained: no math library required.
+
+static double splat_sqrt(double x) {
+  if (x <= 0.0)
+    return 0.0;
+  double g = x > 1.0 ? x : 1.0;
+  for (int i = 0; i < 60; ++i)
+    g = 0.5 * (g + x / g);
+  return g;
+}
+
+static size_t splat_next_pow2(size_t n) {
+  size_t p = 1;
+  while (p < n)
+    p <<= 1;
+  return p;
+}
+
+// Open-addressing map from a 24-bit 0xRRGGBB color to its palette index.
+typedef struct {
+  uint32_t *key; // stored as color+1; 0 marks an empty slot
+  uint32_t *val;
+  size_t cap; // power of two
+} ColorMap;
+
+static bool colormap_init(ColorMap *m, size_t expected) {
+  size_t cap = splat_next_pow2(expected < 16 ? 16 : expected * 2);
+  m->key = calloc(cap, sizeof(uint32_t));
+  m->val = malloc(cap * sizeof(uint32_t));
+  if (!m->key || !m->val) {
+    free(m->key);
+    free(m->val);
+    return false;
+  }
+  m->cap = cap;
+  return true;
+}
+
+static void colormap_free(ColorMap *m) {
+  free(m->key);
+  free(m->val);
+  m->key = m->val = NULL;
+}
+
+// Look up `color`; if present set *out and return true, else return false.
+static bool colormap_get(const ColorMap *m, uint32_t color, uint32_t *out) {
+  size_t mask = m->cap - 1;
+  size_t h = ((size_t)color * 2654435761u) & mask;
+  while (m->key[h] != 0) {
+    if (m->key[h] == color + 1) {
+      *out = m->val[h];
+      return true;
+    }
+    h = (h + 1) & mask;
+  }
+  return false;
+}
+
+static void colormap_put(ColorMap *m, uint32_t color, uint32_t value) {
+  size_t mask = m->cap - 1;
+  size_t h = ((size_t)color * 2654435761u) & mask;
+  while (m->key[h] != 0)
+    h = (h + 1) & mask;
+  m->key[h] = color + 1;
+  m->val[h] = value;
+}
+
+// Build a 2D (depth=frames=1) video from a tightly packed w*h RGB8 buffer.
+// On success *out owns freshly allocated palette/index (free via
+// free_splat4DVideo).
+bool image_to_video(const uint8_t *rgb, uint32_t w, uint32_t h, Splat4DVideo *out) {
+  if (!rgb || !out || w == 0 || h == 0)
+    return false;
+
+  uint64_t npix = (uint64_t)w * (uint64_t)h;
+  if (npix > SIZE_MAX / sizeof(uint64_t))
+    return false;
+
+  uint64_t *index = malloc((size_t)npix * sizeof(uint64_t));
+  if (!index)
+    return false;
+
+  size_t map_hint = npix < (1u << 24) ? (size_t)npix : (1u << 24);
+  ColorMap map;
+  if (!colormap_init(&map, map_hint)) {
+    free(index);
+    return false;
+  }
+
+  uint32_t *colors = NULL;
+  size_t pal_cap = 0, pal_n = 0;
+  bool ok = true;
+
+  for (uint64_t i = 0; i < npix && ok; ++i) {
+    uint32_t color =
+        ((uint32_t)rgb[i * 3] << 16) | ((uint32_t)rgb[i * 3 + 1] << 8) | (uint32_t)rgb[i * 3 + 2];
+    uint32_t idx;
+    if (!colormap_get(&map, color, &idx)) {
+      if (pal_n == UINT32_MAX) { // palette index must stay in uint32
+        ok = false;
+        break;
+      }
+      if (pal_n == pal_cap) {
+        size_t new_cap = pal_cap ? pal_cap * 2 : 256;
+        uint32_t *grown = realloc(colors, new_cap * sizeof(uint32_t));
+        if (!grown) {
+          ok = false;
+          break;
+        }
+        colors = grown;
+        pal_cap = new_cap;
+      }
+      idx = (uint32_t)pal_n;
+      colors[pal_n++] = color;
+      colormap_put(&map, color, idx);
+    }
+    index[i] = idx;
+  }
+  colormap_free(&map);
+
+  if (!ok || pal_n == 0) {
+    free(colors);
+    free(index);
+    return false;
+  }
+
+  // Accumulate spatial mean/variance per palette entry (second pass).
+  double *cnt = calloc(pal_n, sizeof(double));
+  double *sx = calloc(pal_n, sizeof(double));
+  double *sy = calloc(pal_n, sizeof(double));
+  double *sxx = calloc(pal_n, sizeof(double));
+  double *syy = calloc(pal_n, sizeof(double));
+  Splat4D *palette = malloc(pal_n * sizeof(Splat4D));
+  if (!cnt || !sx || !sy || !sxx || !syy || !palette) {
+    free(cnt);
+    free(sx);
+    free(sy);
+    free(sxx);
+    free(syy);
+    free(palette);
+    free(colors);
+    free(index);
+    return false;
+  }
+
+  for (uint64_t i = 0; i < npix; ++i) {
+    uint64_t j = index[i];
+    double x = (double)(i % w);
+    double y = (double)(i / w);
+    cnt[j] += 1.0;
+    sx[j] += x;
+    sy[j] += y;
+    sxx[j] += x * x;
+    syy[j] += y * y;
+  }
+
+  for (size_t j = 0; j < pal_n; ++j) {
+    double n = cnt[j];
+    double mx = sx[j] / n, my = sy[j] / n;
+    double vx = sxx[j] / n - mx * mx;
+    double vy = syy[j] / n - my * my;
+    uint32_t c = colors[j];
+    palette[j] =
+        create_splat4D((float)mx, (float)splat_sqrt(vx), (float)my, (float)splat_sqrt(vy), 0.0f,
+                       0.0f, 0.0f, 0.0f, (float)((c >> 16) & 0xFF) / 255.0f,
+                       (float)((c >> 8) & 0xFF) / 255.0f, (float)(c & 0xFF) / 255.0f, 1.0f);
+  }
+
+  free(cnt);
+  free(sx);
+  free(sy);
+  free(sxx);
+  free(syy);
+  free(colors);
+
+  uint32_t iw = (pal_n <= 256)     ? SPLAT_INDEX_WIDTH_8
+                : (pal_n <= 65536) ? SPLAT_INDEX_WIDTH_16
+                                   : SPLAT_INDEX_WIDTH_32;
+  uint32_t flags = SPLAT_FLAG_PRECISION_FLOAT32 | (iw << SPLAT_FLAG_INDEX_WIDTH_SHIFT);
+  Splat4DHeader header = create_splat4DHeader(w, h, 1, 1, (uint32_t)pal_n, flags);
+  *out = create_splat4DVideo(header, palette, index);
+  return true;
+}
+
+static uint8_t splat_channel_to_u8(float v) {
+  float s = v * 255.0f + 0.5f;
+  if (s < 0.0f)
+    s = 0.0f;
+  if (s > 255.0f)
+    s = 255.0f;
+  return (uint8_t)s;
+}
+
+// Reconstruct a tightly packed w*h RGB8 buffer from a 2D video. *rgb_out owns a
+// freshly allocated buffer on success (caller frees).
+bool video_to_image(const Splat4DVideo *v, uint8_t **rgb_out, uint32_t *w_out, uint32_t *h_out) {
+  if (!v || !rgb_out || !v->palette.palette || !v->index.index)
+    return false;
+  if (v->header.depth != 1 || v->header.frames != 1) {
+    LOG_ERROR("❌ Image decode requires a 2D video (depth=frames=1)\n");
+    return false;
+  }
+  uint32_t w = v->header.width, h = v->header.height;
+  uint64_t npix = (uint64_t)w * (uint64_t)h;
+  if (npix == 0 || npix > SIZE_MAX / 3)
+    return false;
+
+  uint8_t *rgb = malloc((size_t)npix * 3);
+  if (!rgb)
+    return false;
+
+  for (uint64_t i = 0; i < npix; ++i) {
+    uint64_t idx = v->index.index[i];
+    if (idx >= v->header.pSize) {
+      free(rgb);
+      return false;
+    }
+    const Splat4D *s = &v->palette.palette[idx];
+    rgb[i * 3] = splat_channel_to_u8(s->r);
+    rgb[i * 3 + 1] = splat_channel_to_u8(s->g);
+    rgb[i * 3 + 2] = splat_channel_to_u8(s->b);
+  }
+
+  *rgb_out = rgb;
+  if (w_out)
+    *w_out = w;
+  if (h_out)
+    *h_out = h;
+  return true;
+}
+
 #ifndef UNIT_TEST
 typedef struct {
   uint32_t width;
@@ -2550,7 +2787,9 @@ static void print_usage(FILE *stream) {
           "      [--splat-shape <shape>] [--color-space <space>] [--interpolation <mode>] "
           "[--sorted] [--metadata <0-255>]\n"
           "  4splat decode --input <file.4spl> [--palette <palette.bin>] [--index <index.bin>] "
-          "[--output <file.4spl>] [--to-color <space>] [--print] [--validate]\n");
+          "[--output <file.4spl>] [--to-color <space>] [--print] [--validate]\n"
+          "  4splat encode-image <in.ppm> <out.4spl> [compression]   (lossless P6 PPM encode)\n"
+          "  4splat decode-image <in.4spl> <out.ppm>\n");
 }
 
 // Parse a color-space name (as used on the command line) into its flag value.
@@ -3125,6 +3364,167 @@ static int command_decode(int argc, char **argv) {
   return EXIT_SUCCESS;
 }
 
+// Read a binary PPM (P6). On success returns an RGB8 buffer (caller frees) and
+// its dimensions. Supports comments and 8-bit maxval only.
+static uint8_t *read_ppm(const char *path, uint32_t *w_out, uint32_t *h_out) {
+  FILE *fp = fopen(path, "rb");
+  if (!fp) {
+    LOG_ERROR("❌ Unable to open '%s': %s\n", path, strerror(errno));
+    return NULL;
+  }
+  char magic[3] = {0};
+  if (fscanf(fp, "%2s", magic) != 1 || strcmp(magic, "P6") != 0) {
+    LOG_ERROR("❌ '%s' is not a binary PPM (P6)\n", path);
+    fclose(fp);
+    return NULL;
+  }
+
+  // Read width, height, maxval, skipping whitespace and #-comments.
+  long vals[3];
+  int got = 0;
+  while (got < 3) {
+    int c = fgetc(fp);
+    if (c == EOF) {
+      LOG_ERROR("❌ Truncated PPM header in '%s'\n", path);
+      fclose(fp);
+      return NULL;
+    }
+    if (c == '#') {
+      while ((c = fgetc(fp)) != EOF && c != '\n')
+        ;
+      continue;
+    }
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+      continue;
+    ungetc(c, fp);
+    if (fscanf(fp, "%ld", &vals[got]) != 1) {
+      LOG_ERROR("❌ Malformed PPM header in '%s'\n", path);
+      fclose(fp);
+      return NULL;
+    }
+    got++;
+  }
+  if (vals[0] <= 0 || vals[1] <= 0 || vals[2] != 255) {
+    LOG_ERROR("❌ Unsupported PPM (need positive dimensions and maxval 255)\n");
+    fclose(fp);
+    return NULL;
+  }
+  fgetc(fp); // single whitespace byte after maxval
+
+  uint32_t w = (uint32_t)vals[0], h = (uint32_t)vals[1];
+  size_t n = (size_t)w * (size_t)h * 3;
+  uint8_t *rgb = malloc(n);
+  if (!rgb) {
+    fclose(fp);
+    return NULL;
+  }
+  if (fread(rgb, 1, n, fp) != n) {
+    LOG_ERROR("❌ Truncated pixel data in '%s'\n", path);
+    free(rgb);
+    fclose(fp);
+    return NULL;
+  }
+  fclose(fp);
+  *w_out = w;
+  *h_out = h;
+  return rgb;
+}
+
+static bool write_ppm(const char *path, const uint8_t *rgb, uint32_t w, uint32_t h) {
+  FILE *fp = fopen(path, "wb");
+  if (!fp) {
+    LOG_ERROR("❌ Unable to create '%s': %s\n", path, strerror(errno));
+    return false;
+  }
+  fprintf(fp, "P6\n%u %u\n255\n", w, h);
+  size_t n = (size_t)w * (size_t)h * 3;
+  bool ok = fwrite(rgb, 1, n, fp) == n;
+  fclose(fp);
+  return ok;
+}
+
+static int command_encode_image(int argc, char **argv) {
+  if (argc != 2 && argc != 3) {
+    LOG_ERROR("❌ Usage: 4splat encode-image <in.ppm> <out.4spl> [compression]\n");
+    return EXIT_FAILURE;
+  }
+  uint32_t codec = SPLAT_COMPRESSION_NONE;
+  if (argc == 3) {
+    if (!parse_compression_name(argv[2], &codec)) {
+      LOG_ERROR("❌ Unknown compression scheme '%s'\n", argv[2]);
+      return EXIT_FAILURE;
+    }
+    if (!splat_compression_available(codec)) {
+      LOG_ERROR("❌ Compression scheme not available in this build: %s\n",
+                splat_compression_display_name(codec));
+      return EXIT_FAILURE;
+    }
+  }
+
+  uint32_t w = 0, h = 0;
+  uint8_t *rgb = read_ppm(argv[0], &w, &h);
+  if (!rgb)
+    return EXIT_FAILURE;
+
+  Splat4DVideo video;
+  bool built = image_to_video(rgb, w, h, &video);
+  free(rgb);
+  if (!built) {
+    LOG_ERROR("❌ Failed to build 4Splat video from image\n");
+    return EXIT_FAILURE;
+  }
+  if (codec != SPLAT_COMPRESSION_NONE)
+    set_flag_field(&video.header.flags, SPLAT_FLAG_COMPRESSION_MASK, SPLAT_FLAG_COMPRESSION_SHIFT,
+                   codec);
+
+  FILE *fp = fopen(argv[1], "wb");
+  if (!fp) {
+    LOG_ERROR("❌ Unable to create '%s': %s\n", argv[1], strerror(errno));
+    free_splat4DVideo(&video);
+    return EXIT_FAILURE;
+  }
+  bool wrote = write_splat4DVideo(fp, &video);
+  fclose(fp);
+  printf("✅ Encoded %ux%u image (%u colors) to '%s'\n", w, h, video.header.pSize, argv[1]);
+  free_splat4DVideo(&video);
+  return wrote ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+static int command_decode_image(int argc, char **argv) {
+  if (argc != 2) {
+    LOG_ERROR("❌ Usage: 4splat decode-image <in.4spl> <out.ppm>\n");
+    return EXIT_FAILURE;
+  }
+  FILE *fp = fopen(argv[0], "rb");
+  if (!fp) {
+    LOG_ERROR("❌ Unable to open '%s': %s\n", argv[0], strerror(errno));
+    return EXIT_FAILURE;
+  }
+  Splat4DVideo video;
+  bool read_ok = read_splat4DVideo(fp, &video);
+  fclose(fp);
+  if (!read_ok) {
+    LOG_ERROR("❌ Failed to read '%s'\n", argv[0]);
+    return EXIT_FAILURE;
+  }
+
+  uint8_t *rgb = NULL;
+  uint32_t w = 0, h = 0;
+  bool ok = video_to_image(&video, &rgb, &w, &h);
+  free_splat4DVideo(&video);
+  if (!ok)
+    return EXIT_FAILURE;
+
+  bool wrote = write_ppm(argv[1], rgb, w, h);
+  free(rgb);
+  if (!wrote) {
+    LOG_ERROR("❌ Failed to write '%s'\n", argv[1]);
+    return EXIT_FAILURE;
+  }
+  printf("✅ Decoded '%s' to %ux%u image '%s'\n", argv[0], w, h, argv[1]);
+  return EXIT_SUCCESS;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     print_usage(stderr);
@@ -3137,6 +3537,12 @@ int main(int argc, char **argv) {
   }
   if (strcmp(command, "decode") == 0) {
     return command_decode(argc - 2, argv + 2);
+  }
+  if (strcmp(command, "encode-image") == 0) {
+    return command_encode_image(argc - 2, argv + 2);
+  }
+  if (strcmp(command, "decode-image") == 0) {
+    return command_decode_image(argc - 2, argv + 2);
   }
 
   print_usage(stderr);

@@ -1124,6 +1124,72 @@ static bool test_color_convert_rejects_unsupported(void) {
 }
 #endif // SPLAT_WITH_LCMS2
 
+static bool test_image_round_trip(void) {
+  // 2x2: red, green, red, blue -> 3 distinct colors
+  uint8_t rgb[12] = {255, 0, 0, 0, 255, 0, 255, 0, 0, 0, 0, 255};
+  Splat4DVideo v;
+  if (!image_to_video(rgb, 2, 2, &v))
+    return false;
+
+  bool ok = v.header.pSize == 3 && v.header.width == 2 && v.header.height == 2 &&
+            v.header.depth == 1 && v.header.frames == 1;
+  uint8_t *out = NULL;
+  uint32_t w = 0, h = 0;
+  if (ok)
+    ok = video_to_image(&v, &out, &w, &h);
+  if (ok)
+    ok = w == 2 && h == 2 && memcmp(rgb, out, sizeof rgb) == 0;
+  free(out);
+  free_splat4DVideo(&v);
+  return ok;
+}
+
+static bool test_image_through_file(void) {
+  uint8_t rgb[12] = {10, 20, 30, 40, 50, 60, 10, 20, 30, 200, 100, 50};
+  Splat4DVideo v;
+  if (!image_to_video(rgb, 2, 2, &v))
+    return false;
+
+  FILE *fp = tmpfile();
+  if (!fp) {
+    free_splat4DVideo(&v);
+    return false;
+  }
+  bool ok = write_splat4DVideo(fp, &v);
+  free_splat4DVideo(&v);
+  if (!ok) {
+    fclose(fp);
+    return false;
+  }
+  rewind(fp);
+  Splat4DVideo loaded;
+  ok = read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  if (!ok)
+    return false;
+
+  uint8_t *out = NULL;
+  uint32_t w = 0, h = 0;
+  ok = video_to_image(&loaded, &out, &w, &h) && w == 2 && h == 2 &&
+       memcmp(rgb, out, sizeof rgb) == 0;
+  free(out);
+  free_splat4DVideo(&loaded);
+  return ok;
+}
+
+static bool test_image_decode_rejects_non_2d(void) {
+  uint8_t rgb[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+  Splat4DVideo v;
+  if (!image_to_video(rgb, 2, 2, &v))
+    return false;
+  v.header.depth = 2; // pretend the video is volumetric
+  uint8_t *out = NULL;
+  bool rejected = !video_to_image(&v, &out, NULL, NULL);
+  free(out);
+  free_splat4DVideo(&v);
+  return rejected;
+}
+
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
@@ -1183,6 +1249,9 @@ static test_case TESTS[] = {
     {"round_trip_preserves_descriptive_flags", test_round_trip_preserves_descriptive_flags},
     {"read_video_rejects_reserved_splat_shape", test_read_video_rejects_reserved_splat_shape},
     {"read_video_rejects_encryption", test_read_video_rejects_encryption},
+    {"image_round_trip", test_image_round_trip},
+    {"image_through_file", test_image_through_file},
+    {"image_decode_rejects_non_2d", test_image_decode_rejects_non_2d},
     {"half_conversion_exact_values", test_half_conversion_exact_values},
     {"round_trip_float64_palette", test_round_trip_float64_palette},
     {"round_trip_float16_palette", test_round_trip_float16_palette},
