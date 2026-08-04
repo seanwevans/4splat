@@ -1269,6 +1269,160 @@ static bool test_shape_full_covariance_round_trip(void) {
          out.sigma_xy == 0.25f && out.sigma_xz == 0.5f && out.sigma_yz == 0.75f;
 }
 
+static bool test_video_round_trip_shared_palette(void) {
+  // Two 2x1 frames; green is shared, so the global palette has 3 colors, not 4.
+  uint8_t f0[6] = {255, 0, 0, 0, 255, 0}; // red, green
+  uint8_t f1[6] = {0, 255, 0, 0, 0, 255}; // green, blue
+  const uint8_t *frames[2] = {f0, f1};
+  Splat4DVideo v;
+  if (!frames_to_video(frames, 2, 2, 1, &v))
+    return false;
+
+  bool ok = v.header.pSize == 3 && v.header.frames == 2 && v.header.width == 2 &&
+            v.header.height == 1 && v.header.depth == 1;
+  uint8_t **rec = NULL;
+  uint32_t nf = 0, w = 0, h = 0;
+  if (ok)
+    ok = video_to_frames(&v, &rec, &nf, &w, &h);
+  if (ok)
+    ok = nf == 2 && w == 2 && h == 1 && memcmp(rec[0], f0, 6) == 0 && memcmp(rec[1], f1, 6) == 0;
+  if (rec) {
+    for (uint32_t t = 0; t < nf; ++t)
+      free(rec[t]);
+    free(rec);
+  }
+  free_splat4DVideo(&v);
+  return ok;
+}
+
+static bool test_video_through_file(void) {
+  uint8_t f0[6] = {10, 20, 30, 40, 50, 60};
+  uint8_t f1[6] = {40, 50, 60, 70, 80, 90};
+  const uint8_t *frames[2] = {f0, f1};
+  Splat4DVideo v;
+  if (!frames_to_video(frames, 2, 2, 1, &v))
+    return false;
+
+  FILE *fp = tmpfile();
+  if (!fp) {
+    free_splat4DVideo(&v);
+    return false;
+  }
+  bool ok = write_splat4DVideo(fp, &v);
+  free_splat4DVideo(&v);
+  if (!ok) {
+    fclose(fp);
+    return false;
+  }
+  rewind(fp);
+  Splat4DVideo loaded;
+  ok = read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  if (!ok)
+    return false;
+
+  uint8_t **rec = NULL;
+  uint32_t nf = 0, w = 0, h = 0;
+  ok = video_to_frames(&loaded, &rec, &nf, &w, &h) && nf == 2 && memcmp(rec[0], f0, 6) == 0 &&
+       memcmp(rec[1], f1, 6) == 0;
+  if (rec) {
+    for (uint32_t t = 0; t < nf; ++t)
+      free(rec[t]);
+    free(rec);
+  }
+  free_splat4DVideo(&loaded);
+  return ok;
+}
+
+// image_to_video is exactly the single-frame collapse of the video codec.
+static bool test_image_is_single_frame_video(void) {
+  uint8_t rgb[6] = {1, 2, 3, 200, 100, 50};
+  Splat4DVideo vi, vv;
+  if (!image_to_video(rgb, 2, 1, &vi))
+    return false;
+  const uint8_t *frames[1] = {rgb};
+  if (!frames_to_video(frames, 1, 2, 1, &vv)) {
+    free_splat4DVideo(&vi);
+    return false;
+  }
+  bool ok = vi.header.frames == 1 && vv.header.frames == 1 && vi.header.pSize == vv.header.pSize &&
+            vi.footer.checksum == vv.footer.checksum;
+  free_splat4DVideo(&vi);
+  free_splat4DVideo(&vv);
+  return ok;
+}
+
+// Frozen conformance vector: the exact v0.2 on-disk bytes for a fixed 2x1x1x1,
+// 2-entry axis-aligned float32 video. All float values are exactly representable
+// in binary32, so these bytes are platform-independent. Any change to the
+// serialization (field order, sizes, markers, endianness) breaks this test.
+static const uint8_t GOLDEN_4SPL[] = {
+    0x34, 0x53, 0x50, 0x4C, 0x01, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // magic,ver,width
+    0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // height,depth,frames
+    0x02, 0x00, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00,                         // pSize, flags=0x0404
+    0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x40, 0x40, 0x00, 0x00, 0xA0, 0x40, // mu_x,mu_y,mu_z
+    0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x80, 0x40, 0x00, 0x00, 0xC0, 0x40, // sigma_x,y,z
+    0x00, 0x00, 0xE0, 0x40, 0x00, 0x00, 0x00, 0x41,                         // mu_t, sigma_t
+    0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3E, 0x00, 0x00, 0x40, 0x3F, // r,g,b
+    0x00, 0x00, 0x80, 0x3F,                                                 // alpha (entry 0 end)
+    0x00, 0x00, 0x10, 0x41, 0x00, 0x00, 0x30, 0x41, 0x00, 0x00, 0x50, 0x41, // entry 1 mu_x,y,z
+    0x00, 0x00, 0x20, 0x41, 0x00, 0x00, 0x40, 0x41, 0x00, 0x00, 0x60, 0x41, // sigma_x,y,z
+    0x00, 0x00, 0x70, 0x41, 0x00, 0x00, 0x80, 0x41,                         // mu_t, sigma_t
+    0x00, 0x00, 0x00, 0x3E, 0x00, 0x00, 0xC0, 0x3E, 0x00, 0x00, 0x20, 0x3F, // r,g,b
+    0x00, 0x00, 0x60, 0x3F,                                                 // alpha (entry 1 end)
+    0x00, 0x01,                                                             // index: 0, 1
+    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,                         // footer idxoffset=128
+    0x0F, 0x84, 0xC3, 0xAD,                                                 // checksum
+    0x4C, 0x50, 0x53, 0x34,                                                 // "LPS4"
+};
+
+static bool test_golden_conformance_vector(void) {
+  Splat4D pal[2];
+  pal[0] = create_splat4D(1, 2, 3, 4, 5, 6, 7, 8, 0.5f, 0.25f, 0.75f, 1.0f);
+  pal[1] = create_splat4D(9, 10, 11, 12, 13, 14, 15, 16, 0.125f, 0.375f, 0.625f, 0.875f);
+  uint64_t idx[2] = {0, 1};
+  Splat4DHeader h = create_splat4DHeader(
+      2, 1, 1, 1, 2,
+      SPLAT_FLAG_PRECISION_FLOAT32 | (SPLAT_SHAPE_AXIS_ALIGNED << SPLAT_FLAG_SPLAT_SHAPE_SHIFT));
+  Splat4DVideo v = create_splat4DVideo(h, pal, idx);
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  bool ok = write_splat4DVideo(fp, &v);
+  if (ok) {
+    fflush(fp);
+    fseek(fp, 0, SEEK_END);
+    long n = ftell(fp);
+    rewind(fp);
+    uint8_t buf[sizeof GOLDEN_4SPL];
+    ok = n == (long)sizeof GOLDEN_4SPL && fread(buf, 1, sizeof buf, fp) == sizeof buf &&
+         memcmp(buf, GOLDEN_4SPL, sizeof buf) == 0;
+  }
+  fclose(fp);
+  return ok;
+}
+
+// The frozen vector also reads back to the exact field values it encodes.
+static bool test_golden_vector_reads_back(void) {
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  fwrite(GOLDEN_4SPL, 1, sizeof GOLDEN_4SPL, fp);
+  rewind(fp);
+  Splat4DVideo v;
+  bool ok = read_splat4DVideo(fp, &v);
+  fclose(fp);
+  if (!ok)
+    return false;
+  const Splat4D *s = &v.palette.palette[0];
+  ok = v.header.width == 2 && v.header.pSize == 2 && v.header.version[1] == 1 && s->mu_x == 1.0f &&
+       s->mu_y == 3.0f && s->sigma_x == 2.0f && s->sigma_z == 6.0f && s->r == 0.5f &&
+       s->alpha == 1.0f && v.index.index[1] == 1;
+  free_splat4DVideo(&v);
+  return ok;
+}
+
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
@@ -1331,6 +1485,11 @@ static test_case TESTS[] = {
     {"image_round_trip", test_image_round_trip},
     {"image_through_file", test_image_through_file},
     {"image_decode_rejects_non_2d", test_image_decode_rejects_non_2d},
+    {"video_round_trip_shared_palette", test_video_round_trip_shared_palette},
+    {"video_through_file", test_video_through_file},
+    {"image_is_single_frame_video", test_image_is_single_frame_video},
+    {"golden_conformance_vector", test_golden_conformance_vector},
+    {"golden_vector_reads_back", test_golden_vector_reads_back},
     {"palette_entry_disk_bytes_by_shape", test_palette_entry_disk_bytes_by_shape},
     {"shape_isotropic_collapses_sigmas", test_shape_isotropic_collapses_sigmas},
     {"shape_axis_aligned_round_trip", test_shape_axis_aligned_round_trip},
