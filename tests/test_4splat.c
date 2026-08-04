@@ -272,7 +272,7 @@ static bool test_validate_fails_for_unsupported_precision(void) {
   make_indices(indices);
   Splat4DVideo video = create_splat4DVideo(make_header(), palette, indices);
   video.header.flags &= ~SPLAT_FLAG_PRECISION_MASK;
-  video.header.flags |= SPLAT_FLAG_PRECISION_FLOAT64;
+  video.header.flags |= SPLAT_FLAG_PRECISION_FLOAT128;
   video.footer.checksum = compute_video_checksum(&video);
   return !validate_splat4DVideo(&video);
 }
@@ -396,14 +396,14 @@ static bool test_write_palette_rejects_nulls(void) {
   make_palette(palette_data);
   Splat4DPalette palette = create_splat4DPalette(palette_data);
   bool all_failed = true;
-  all_failed &= !write_splat4DPalette(NULL, &palette, 2);
+  all_failed &= !write_splat4DPalette(NULL, &palette, 2, SPLAT_FLAG_PRECISION_FLOAT32);
   FILE *fp = tmpfile();
   if (!fp)
     return false;
-  all_failed &= !write_splat4DPalette(fp, NULL, 2);
+  all_failed &= !write_splat4DPalette(fp, NULL, 2, SPLAT_FLAG_PRECISION_FLOAT32);
   Splat4DPalette empty = create_splat4DPalette(NULL);
-  all_failed &= !write_splat4DPalette(fp, &empty, 2);
-  all_failed &= !write_splat4DPalette(fp, &palette, 0);
+  all_failed &= !write_splat4DPalette(fp, &empty, 2, SPLAT_FLAG_PRECISION_FLOAT32);
+  all_failed &= !write_splat4DPalette(fp, &palette, 0, SPLAT_FLAG_PRECISION_FLOAT32);
   fclose(fp);
   return all_failed;
 }
@@ -413,9 +413,9 @@ static bool test_read_palette_rejects_invalid_inputs(void) {
   FILE *fp = tmpfile();
   if (!fp)
     return false;
-  bool fail_fp = !read_splat4DPalette(NULL, &palette, 2);
-  bool fail_palette = !read_splat4DPalette(fp, NULL, 2);
-  bool fail_count = !read_splat4DPalette(fp, &palette, 0);
+  bool fail_fp = !read_splat4DPalette(NULL, &palette, 2, SPLAT_FLAG_PRECISION_FLOAT32);
+  bool fail_palette = !read_splat4DPalette(fp, NULL, 2, SPLAT_FLAG_PRECISION_FLOAT32);
+  bool fail_count = !read_splat4DPalette(fp, &palette, 0, SPLAT_FLAG_PRECISION_FLOAT32);
   fclose(fp);
   return fail_fp && fail_palette && fail_count;
 }
@@ -429,7 +429,8 @@ static bool test_read_palette_fails_on_short_file(void) {
   fwrite(&one, sizeof(Splat4D), 1, fp);
   rewind(fp);
   Splat4DPalette palette = {.palette = NULL};
-  bool ok = !read_splat4DPalette(fp, &palette, 2) && palette.palette == NULL;
+  bool ok = !read_splat4DPalette(fp, &palette, 2, SPLAT_FLAG_PRECISION_FLOAT32) &&
+            palette.palette == NULL;
   fclose(fp);
   return ok;
 }
@@ -895,6 +896,91 @@ static bool test_read_video_rejects_encryption(void) {
   return ok;
 }
 
+static bool test_half_conversion_exact_values(void) {
+  // Values exactly representable in binary16 must survive the round trip.
+  const float exact[] = {0.0f, 1.0f, -1.0f, 0.5f, -2.0f, 2048.0f, 0.0009765625f, 65504.0f};
+  for (size_t i = 0; i < ARRAY_SIZE(exact); ++i) {
+    if (half_to_float(float_to_half(exact[i])) != exact[i])
+      return false;
+  }
+  // Idempotence: narrowing an already-half value again yields the same bits.
+  uint16_t a = float_to_half(0.6f);
+  uint16_t b = float_to_half(half_to_float(a));
+  return a == b;
+}
+
+static bool test_round_trip_float64_palette(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  Splat4DHeader header = create_splat4DHeader(2, 2, 1, 1, 2, SPLAT_FLAG_PRECISION_FLOAT64);
+  Splat4DVideo original = create_splat4DVideo(header, palette, indices);
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  if (!write_splat4DVideo(fp, &original)) {
+    fclose(fp);
+    return false;
+  }
+  rewind(fp);
+  Splat4DVideo loaded;
+  bool ok = read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  if (!ok)
+    return false;
+
+  // Widening float32 -> float64 -> float32 is exact, so the palette is identical.
+  bool palette_match =
+      memcmp(original.palette.palette, loaded.palette.palette, 2 * sizeof(Splat4D)) == 0;
+  bool precision_ok =
+      (loaded.header.flags & SPLAT_FLAG_PRECISION_MASK) == SPLAT_FLAG_PRECISION_FLOAT64;
+  free_splat4DVideo(&loaded);
+  return palette_match && precision_ok;
+}
+
+static bool test_round_trip_float16_palette(void) {
+  Splat4D palette[2];
+  uint64_t indices[4];
+  make_palette(palette);
+  make_indices(indices);
+  // float16 is selected explicitly, bypassing the float32 default in sanitize.
+  Splat4DHeader header = create_splat4DHeader(2, 2, 1, 1, 2, 0);
+  header.flags = (header.flags & ~SPLAT_FLAG_PRECISION_MASK) | SPLAT_FLAG_PRECISION_FLOAT16;
+  Splat4DVideo original = create_splat4DVideo(header, palette, indices);
+
+  FILE *fp = tmpfile();
+  if (!fp)
+    return false;
+  if (!write_splat4DVideo(fp, &original)) {
+    fclose(fp);
+    return false;
+  }
+  rewind(fp);
+  Splat4DVideo loaded;
+  bool ok = read_splat4DVideo(fp, &loaded);
+  fclose(fp);
+  if (!ok)
+    return false;
+
+  // float16 storage is lossy: the recovered palette equals the originals passed
+  // through the narrowing conversion.
+  Splat4D expected[2];
+  for (int e = 0; e < 2; ++e) {
+    float comps[12];
+    memcpy(comps, &palette[e], sizeof comps);
+    for (int i = 0; i < 12; ++i)
+      comps[i] = half_to_float(float_to_half(comps[i]));
+    memcpy(&expected[e], comps, sizeof comps);
+  }
+  bool palette_match = memcmp(expected, loaded.palette.palette, 2 * sizeof(Splat4D)) == 0;
+  bool precision_ok =
+      (loaded.header.flags & SPLAT_FLAG_PRECISION_MASK) == SPLAT_FLAG_PRECISION_FLOAT16;
+  free_splat4DVideo(&loaded);
+  return palette_match && precision_ok;
+}
+
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
@@ -954,6 +1040,9 @@ static test_case TESTS[] = {
     {"round_trip_preserves_descriptive_flags", test_round_trip_preserves_descriptive_flags},
     {"read_video_rejects_reserved_splat_shape", test_read_video_rejects_reserved_splat_shape},
     {"read_video_rejects_encryption", test_read_video_rejects_encryption},
+    {"half_conversion_exact_values", test_half_conversion_exact_values},
+    {"round_trip_float64_palette", test_round_trip_float64_palette},
+    {"round_trip_float16_palette", test_round_trip_float16_palette},
 };
 
 int main(void) {
