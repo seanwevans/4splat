@@ -7,14 +7,14 @@
 #   make clean
 #
 # The full-featured build needs the development packages for zlib, bzip2, xz
-# (liblzma), brotli, zstd and lz4. Individual backends can be toggled by
+# (liblzma), brotli, zstd, lz4 and lcms2. Individual backends can be toggled by
 # overriding FEATURES/LIBS, e.g.:
 #   make FEATURES="-DSPLAT_WITH_ZLIB -DSPLAT_WITH_ZSTD" LIBS="-lz -lzstd"
 
 CC ?= gcc
 CFLAGS ?= -Wall -Wpedantic -std=c11 -O2
 FEATURES ?= -DSPLAT_WITH_ALL
-LIBS ?= -lz -lbz2 -llzma -lbrotlienc -lbrotlidec -lzstd -llz4
+LIBS ?= -lz -lbz2 -llzma -lbrotlienc -lbrotlidec -lzstd -llz4 -llcms2
 
 .PHONY: all plain test test-plain clean
 

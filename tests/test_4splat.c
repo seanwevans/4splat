@@ -1070,6 +1070,56 @@ static bool test_read_video_rejects_unavailable_codec(void) {
   return ok;
 }
 
+#ifdef SPLAT_WITH_LCMS2
+static float abs_diff(float a, float b) {
+  float d = a - b;
+  return d < 0 ? -d : d;
+}
+
+static bool test_color_convert_round_trip(void) {
+  Splat4D pal[3];
+  pal[0] = create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.5f, 0.4f, 0.3f, 1.0f);
+  pal[1] = create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.2f, 0.6f, 0.8f, 1.0f);
+  pal[2] = create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.9f, 0.1f, 0.5f, 1.0f);
+  Splat4D orig[3];
+  memcpy(orig, pal, sizeof orig);
+
+  if (!splat_convert_palette_colors(pal, 3, SPLAT_COLOR_SRGB, SPLAT_COLOR_REC2020))
+    return false;
+  bool changed = memcmp(orig, pal, sizeof orig) != 0;
+  if (!splat_convert_palette_colors(pal, 3, SPLAT_COLOR_REC2020, SPLAT_COLOR_SRGB))
+    return false;
+
+  float maxerr = 0.0f;
+  for (int i = 0; i < 3; ++i) {
+    float e = abs_diff(pal[i].r, orig[i].r);
+    if (e > maxerr)
+      maxerr = e;
+    e = abs_diff(pal[i].g, orig[i].g);
+    if (e > maxerr)
+      maxerr = e;
+    e = abs_diff(pal[i].b, orig[i].b);
+    if (e > maxerr)
+      maxerr = e;
+  }
+  return changed && maxerr < 1e-3f;
+}
+
+static bool test_color_convert_identity(void) {
+  Splat4D pal[1] = {create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.3f, 0.4f, 0.5f, 1.0f)};
+  Splat4D orig = pal[0];
+  if (!splat_convert_palette_colors(pal, 1, SPLAT_COLOR_SRGB, SPLAT_COLOR_SRGB))
+    return false;
+  return memcmp(&orig, &pal[0], sizeof orig) == 0;
+}
+
+static bool test_color_convert_rejects_unsupported(void) {
+  // OKLab is not modeled by the lcms backend and must be refused.
+  Splat4D pal[1] = {create_splat4D(0, 0, 0, 0, 0, 0, 0, 0, 0.3f, 0.4f, 0.5f, 1.0f)};
+  return !splat_convert_palette_colors(pal, 1, SPLAT_COLOR_SRGB, SPLAT_COLOR_OKLAB);
+}
+#endif // SPLAT_WITH_LCMS2
+
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
@@ -1135,6 +1185,11 @@ static test_case TESTS[] = {
     {"rle_unit_roundtrip", test_rle_unit_roundtrip},
     {"round_trip_all_available_codecs", test_round_trip_all_available_codecs},
     {"read_video_rejects_unavailable_codec", test_read_video_rejects_unavailable_codec},
+#ifdef SPLAT_WITH_LCMS2
+    {"color_convert_round_trip", test_color_convert_round_trip},
+    {"color_convert_identity", test_color_convert_identity},
+    {"color_convert_rejects_unsupported", test_color_convert_rejects_unsupported},
+#endif
 };
 
 int main(void) {
