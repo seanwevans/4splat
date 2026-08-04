@@ -14,7 +14,7 @@
 CC ?= gcc
 CFLAGS ?= -Wall -Wpedantic -std=c11 -O2
 FEATURES ?= -DSPLAT_WITH_ALL
-LIBS ?= -lz -lbz2 -llzma -lbrotlienc -lbrotlidec -lzstd -llz4 -llcms2 -lm
+LIBS ?= -lz -lbz2 -llzma -lbrotlienc -lbrotlidec -lzstd -llz4 -llcms2 -lm -lpng
 
 .PHONY: all plain test test-plain clean
 

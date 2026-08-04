@@ -81,7 +81,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y zlib1g-dev libbz2-dev liblzma-dev \
-            libbrotli-dev libzstd-dev liblz4-dev liblcms2-dev
+            libbrotli-dev libzstd-dev liblz4-dev liblcms2-dev libpng-dev
           if [ "${{ matrix.compiler }}" = "clang" ]; then sudo apt-get install -y clang; fi
       - name: Build full-featured binary
         run: make CC=${{ matrix.compiler }}

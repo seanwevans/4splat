@@ -181,6 +181,7 @@
 #define SPLAT_WITH_ZSTD
 #define SPLAT_WITH_LZ4
 #define SPLAT_WITH_LCMS2
+#define SPLAT_WITH_PNG
 #endif
 
 #ifdef SPLAT_WITH_ZLIB
@@ -205,6 +206,9 @@
 #ifdef SPLAT_WITH_LCMS2
 #include <lcms2.h>
 #include <math.h> // OKLab transform (powf/cbrtf)
+#endif
+#ifdef SPLAT_WITH_PNG
+#include <png.h>
 #endif
 
 #define LOG_ERROR(...) fprintf(stderr, __VA_ARGS__)
@@ -3668,6 +3672,92 @@ static bool write_ppm(const char *path, const uint8_t *rgb, uint32_t w, uint32_t
   return ok;
 }
 
+// Case-insensitive check that `path` ends with `ext`.
+static bool path_has_ext(const char *path, const char *ext) {
+  size_t lp = strlen(path), le = strlen(ext);
+  if (lp < le)
+    return false;
+  const char *tail = path + lp - le;
+  for (size_t i = 0; i < le; ++i) {
+    char a = tail[i], b = ext[i];
+    if (a >= 'A' && a <= 'Z')
+      a = (char)(a + 32);
+    if (b >= 'A' && b <= 'Z')
+      b = (char)(b + 32);
+    if (a != b)
+      return false;
+  }
+  return true;
+}
+
+#ifdef SPLAT_WITH_PNG
+// 8-bit RGB PNG via libpng's simplified API.
+static uint8_t *read_png(const char *path, uint32_t *w_out, uint32_t *h_out) {
+  png_image image;
+  memset(&image, 0, sizeof image);
+  image.version = PNG_IMAGE_VERSION;
+  if (!png_image_begin_read_from_file(&image, path)) {
+    LOG_ERROR("❌ Unable to read PNG '%s'\n", path);
+    return NULL;
+  }
+  image.format = PNG_FORMAT_RGB;
+  size_t size = PNG_IMAGE_SIZE(image);
+  uint8_t *buf = malloc(size ? size : 1);
+  if (!buf) {
+    png_image_free(&image);
+    return NULL;
+  }
+  if (!png_image_finish_read(&image, NULL, buf, 0, NULL)) {
+    LOG_ERROR("❌ Failed to decode PNG '%s'\n", path);
+    free(buf);
+    png_image_free(&image);
+    return NULL;
+  }
+  *w_out = image.width;
+  *h_out = image.height;
+  return buf;
+}
+
+static bool write_png(const char *path, const uint8_t *rgb, uint32_t w, uint32_t h) {
+  png_image image;
+  memset(&image, 0, sizeof image);
+  image.version = PNG_IMAGE_VERSION;
+  image.width = w;
+  image.height = h;
+  image.format = PNG_FORMAT_RGB;
+  if (!png_image_write_to_file(&image, path, 0, rgb, 0, NULL)) {
+    LOG_ERROR("❌ Failed to write PNG '%s'\n", path);
+    return false;
+  }
+  return true;
+}
+#endif // SPLAT_WITH_PNG
+
+// Read/write an image by extension: .png (when built with SPLAT_WITH_PNG) or PPM.
+static uint8_t *read_image(const char *path, uint32_t *w, uint32_t *h) {
+  if (path_has_ext(path, ".png")) {
+#ifdef SPLAT_WITH_PNG
+    return read_png(path, w, h);
+#else
+    LOG_ERROR("❌ PNG support not compiled in (build with SPLAT_WITH_PNG)\n");
+    return NULL;
+#endif
+  }
+  return read_ppm(path, w, h);
+}
+
+static bool write_image(const char *path, const uint8_t *rgb, uint32_t w, uint32_t h) {
+  if (path_has_ext(path, ".png")) {
+#ifdef SPLAT_WITH_PNG
+    return write_png(path, rgb, w, h);
+#else
+    LOG_ERROR("❌ PNG support not compiled in (build with SPLAT_WITH_PNG)\n");
+    return false;
+#endif
+  }
+  return write_ppm(path, rgb, w, h);
+}
+
 static int command_encode_image(int argc, char **argv) {
   if (argc != 2 && argc != 3) {
     LOG_ERROR("❌ Usage: 4splat encode-image <in.ppm> <out.4spl> [compression]\n");
@@ -3687,7 +3777,7 @@ static int command_encode_image(int argc, char **argv) {
   }
 
   uint32_t w = 0, h = 0;
-  uint8_t *rgb = read_ppm(argv[0], &w, &h);
+  uint8_t *rgb = read_image(argv[0], &w, &h);
   if (!rgb)
     return EXIT_FAILURE;
 
@@ -3740,7 +3830,7 @@ static int command_decode_image(int argc, char **argv) {
   if (!ok)
     return EXIT_FAILURE;
 
-  bool wrote = write_ppm(argv[1], rgb, w, h);
+  bool wrote = write_image(argv[1], rgb, w, h);
   free(rgb);
   if (!wrote) {
     LOG_ERROR("❌ Failed to write '%s'\n", argv[1]);
@@ -3780,7 +3870,7 @@ static int command_encode_video(int argc, char **argv) {
   bool ok = true;
   for (uint32_t t = 0; t < nframes; ++t) {
     uint32_t fw = 0, fh = 0;
-    frames[t] = read_ppm(argv[a + t], &fw, &fh);
+    frames[t] = read_image(argv[a + t], &fw, &fh);
     if (!frames[t]) {
       ok = false;
       break;
@@ -3852,7 +3942,7 @@ static int command_decode_video(int argc, char **argv) {
   for (uint32_t t = 0; t < nframes && wrote; ++t) {
     char path[4096];
     SAFE_SNPRINTF(path, sizeof path, "%s%04u.ppm", argv[1], t);
-    wrote = write_ppm(path, frames[t], w, h);
+    wrote = write_image(path, frames[t], w, h);
     if (!wrote)
       LOG_ERROR("❌ Failed to write '%s'\n", path);
   }

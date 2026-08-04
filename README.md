@@ -280,11 +280,13 @@ pseudo-GIF — and shares the same code path.
 4splat decode-video out.4spl restored_        # writes restored_0000.ppm, ...
 ```
 
-Input/output is binary PPM (`P6`, maxval 255); all frames must share dimensions.
-An optional compression scheme (e.g. `zstd`, `rle`) compresses the index — a
-2-color checkerboard shrinks from a 30 KB PPM to a few hundred bytes, and a
-4-frame clip with two colors packs into one tiny file, both decoding back
-bit-for-bit.
+Input/output is binary PPM (`P6`, maxval 255); when built with libpng
+(`SPLAT_WITH_PNG`, included in `make`) any input or output whose name ends in
+`.png` is read/written as an 8-bit RGB PNG instead, chosen by file extension.
+All frames must share dimensions. An optional compression scheme (e.g. `zstd`,
+`rle`) compresses the index — a 2-color checkerboard shrinks from a 30 KB PPM to
+a few hundred bytes, and a 4-frame clip with two colors packs into one tiny file,
+both decoding back bit-for-bit.
 
 ## Color-space conversion
 
