@@ -301,6 +301,9 @@ enum { SPLAT4D_STREAM_CHUNK_SIZE = 1 << 15 };
 
 typedef struct {
   float mu_x, sigma_x, mu_y, sigma_y, mu_z, sigma_z, mu_t, sigma_t, r, g, b, alpha;
+  // Off-diagonal spatial covariance terms, used only by the full-covariance
+  // splat shape; zero for isotropic and axis-aligned splats.
+  float sigma_xy, sigma_xz, sigma_yz;
 } Splat4D;
 
 typedef enum {
@@ -1361,9 +1364,11 @@ static uint64_t index_width_max_value(uint8_t idx_width) {
 // (2 bytes/component), float32 (4) or float64 (8). float32 is the in-memory
 // representation, so that path is a byte-for-byte copy; float64 widens exactly;
 // float16 is a lossy narrowing.
-_Static_assert(sizeof(Splat4D) == 12 * sizeof(float), "Splat4D must be 12 packed floats");
+_Static_assert(sizeof(Splat4D) == 15 * sizeof(float), "Splat4D must be 15 packed floats");
 
-#define SPLAT_PALETTE_COMPONENTS 12
+// Largest palette entry (full covariance): mu_{x,y,z} + 6 covariance values +
+// mu_t + sigma_t + r,g,b,alpha.
+#define SPLAT_PALETTE_MAX_COMPONENTS 15
 
 static uint32_t splat_precision_bits(uint32_t flags) {
   return (flags & SPLAT_FLAG_PRECISION_MASK) >> SPLAT_FLAG_PRECISION_SHIFT;
@@ -1380,8 +1385,33 @@ static size_t splat_precision_component_bytes(uint32_t flags) {
   }
 }
 
+static uint32_t splat_shape_bits(uint32_t flags) {
+  return (flags & SPLAT_FLAG_SPLAT_SHAPE_MASK) >> SPLAT_FLAG_SPLAT_SHAPE_SHIFT;
+}
+
+// Number of spatial spread values stored per palette entry for the splat shape:
+// isotropic = 1 (a shared sigma), axis-aligned = 3 (sigma_x/y/z), full
+// covariance = 6 (the symmetric 3x3 upper triangle). The reserved value (3) is
+// rejected by flags_supported() and never reaches here.
+static uint32_t splat_shape_cov_count(uint32_t flags) {
+  switch (splat_shape_bits(flags)) {
+  case 0:
+    return 1; // Isotropic
+  case 2:
+    return 6; // Full covariance
+  default:
+    return 3; // Axis-aligned
+  }
+}
+
+// Total floats in a palette entry: mu_{x,y,z} (3) + covariance block + mu_t +
+// sigma_t (2) + r,g,b,alpha (4).
+static uint32_t splat_palette_component_count(uint32_t flags) {
+  return 3 + splat_shape_cov_count(flags) + 2 + 4;
+}
+
 static size_t palette_entry_disk_bytes(uint32_t flags) {
-  return (size_t)SPLAT_PALETTE_COMPONENTS * splat_precision_component_bytes(flags);
+  return (size_t)splat_palette_component_count(flags) * splat_precision_component_bytes(flags);
 }
 
 // IEEE-754 binary16 <-> binary32 with round-to-nearest-even.
@@ -1449,50 +1479,105 @@ static float half_to_float(uint16_t h) {
   return out;
 }
 
-static void serialize_palette_entry(const Splat4D *s, uint32_t flags, uint8_t *out) {
-  float comps[SPLAT_PALETTE_COMPONENTS];
-  memcpy(comps, s, sizeof comps);
-  switch (splat_precision_bits(flags)) {
-  case 0: // Float16
-    for (int i = 0; i < SPLAT_PALETTE_COMPONENTS; ++i) {
-      uint16_t h = float_to_half(comps[i]);
-      memcpy(out + (size_t)i * 2, &h, 2);
-    }
-    break;
-  case 2: // Float64
-    for (int i = 0; i < SPLAT_PALETTE_COMPONENTS; ++i) {
-      double d = (double)comps[i];
-      memcpy(out + (size_t)i * 8, &d, 8);
-    }
-    break;
-  default: // Float32
-    memcpy(out, comps, sizeof comps);
-    break;
+// Write/read a single float component at the given precision.
+static void store_component(uint8_t *p, float v, uint32_t precision) {
+  if (precision == 0) { // Float16
+    uint16_t h = float_to_half(v);
+    memcpy(p, &h, 2);
+  } else if (precision == 2) { // Float64
+    double d = (double)v;
+    memcpy(p, &d, 8);
+  } else { // Float32
+    memcpy(p, &v, 4);
   }
 }
 
-static void deserialize_palette_entry(const uint8_t *in, uint32_t flags, Splat4D *s) {
-  float comps[SPLAT_PALETTE_COMPONENTS];
-  switch (splat_precision_bits(flags)) {
-  case 0: // Float16
-    for (int i = 0; i < SPLAT_PALETTE_COMPONENTS; ++i) {
-      uint16_t h;
-      memcpy(&h, in + (size_t)i * 2, 2);
-      comps[i] = half_to_float(h);
-    }
-    break;
-  case 2: // Float64
-    for (int i = 0; i < SPLAT_PALETTE_COMPONENTS; ++i) {
-      double d;
-      memcpy(&d, in + (size_t)i * 8, 8);
-      comps[i] = (float)d;
-    }
-    break;
-  default: // Float32
-    memcpy(comps, in, sizeof comps);
-    break;
+static float load_component(const uint8_t *p, uint32_t precision) {
+  if (precision == 0) { // Float16
+    uint16_t h;
+    memcpy(&h, p, 2);
+    return half_to_float(h);
   }
-  memcpy(s, comps, sizeof comps);
+  if (precision == 2) { // Float64
+    double d;
+    memcpy(&d, p, 8);
+    return (float)d;
+  }
+  float f; // Float32
+  memcpy(&f, p, 4);
+  return f;
+}
+
+// Serialize a palette entry in the spec's field order (grouped means, then the
+// shape-dependent covariance block, then temporal and color), each component at
+// the selected precision.
+static void serialize_palette_entry(const Splat4D *s, uint32_t flags, uint8_t *out) {
+  uint32_t precision = splat_precision_bits(flags);
+  uint32_t cov = splat_shape_cov_count(flags);
+  size_t cb = splat_precision_component_bytes(flags);
+
+  float comps[SPLAT_PALETTE_MAX_COMPONENTS];
+  int n = 0;
+  comps[n++] = s->mu_x;
+  comps[n++] = s->mu_y;
+  comps[n++] = s->mu_z;
+  comps[n++] = s->sigma_x; // isotropic stores this single shared sigma
+  if (cov >= 3) {
+    comps[n++] = s->sigma_y;
+    comps[n++] = s->sigma_z;
+  }
+  if (cov >= 6) {
+    comps[n++] = s->sigma_xy;
+    comps[n++] = s->sigma_xz;
+    comps[n++] = s->sigma_yz;
+  }
+  comps[n++] = s->mu_t;
+  comps[n++] = s->sigma_t;
+  comps[n++] = s->r;
+  comps[n++] = s->g;
+  comps[n++] = s->b;
+  comps[n++] = s->alpha;
+
+  for (int i = 0; i < n; ++i)
+    store_component(out + (size_t)i * cb, comps[i], precision);
+}
+
+static void deserialize_palette_entry(const uint8_t *in, uint32_t flags, Splat4D *s) {
+  uint32_t precision = splat_precision_bits(flags);
+  uint32_t cov = splat_shape_cov_count(flags);
+  size_t cb = splat_precision_component_bytes(flags);
+  uint32_t n = splat_palette_component_count(flags);
+
+  float comps[SPLAT_PALETTE_MAX_COMPONENTS];
+  for (uint32_t i = 0; i < n; ++i)
+    comps[i] = load_component(in + (size_t)i * cb, precision);
+
+  int k = 0;
+  s->mu_x = comps[k++];
+  s->mu_y = comps[k++];
+  s->mu_z = comps[k++];
+  if (cov == 1) {
+    // Isotropic: one shared spatial sigma expands to all three axes.
+    s->sigma_x = s->sigma_y = s->sigma_z = comps[k++];
+    s->sigma_xy = s->sigma_xz = s->sigma_yz = 0.0f;
+  } else {
+    s->sigma_x = comps[k++];
+    s->sigma_y = comps[k++];
+    s->sigma_z = comps[k++];
+    if (cov == 6) {
+      s->sigma_xy = comps[k++];
+      s->sigma_xz = comps[k++];
+      s->sigma_yz = comps[k++];
+    } else {
+      s->sigma_xy = s->sigma_xz = s->sigma_yz = 0.0f;
+    }
+  }
+  s->mu_t = comps[k++];
+  s->sigma_t = comps[k++];
+  s->r = comps[k++];
+  s->g = comps[k++];
+  s->b = comps[k++];
+  s->alpha = comps[k++];
 }
 
 typedef enum {
@@ -1549,23 +1634,18 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
   if (palette_bytes > 0) {
     if (!v->palette.palette)
       return false;
-    if (splat_precision_bits(v->header.flags) == 1) {
-      // Float32 is the in-memory layout: stream the palette verbatim.
-      if (!splat4d_stream_block((const uint8_t *)v->palette.palette, palette_bytes, chunk, fn, ctx))
-        return false;
-    } else {
-      // Serialize each entry to the on-disk precision, then stream the buffer.
-      uint8_t *packed = malloc(palette_bytes);
-      if (!packed)
-        return false;
-      for (uint32_t i = 0; i < v->header.pSize; ++i)
-        serialize_palette_entry(&v->palette.palette[i], v->header.flags,
-                                packed + (size_t)i * entry_bytes);
-      bool ok = splat4d_stream_block(packed, palette_bytes, chunk, fn, ctx);
-      free(packed);
-      if (!ok)
-        return false;
-    }
+    // The on-disk palette is always serialized (spec field order + per-shape
+    // covariance + precision), so build it into a buffer and stream that.
+    uint8_t *packed = malloc(palette_bytes);
+    if (!packed)
+      return false;
+    for (uint32_t i = 0; i < v->header.pSize; ++i)
+      serialize_palette_entry(&v->palette.palette[i], v->header.flags,
+                              packed + (size_t)i * entry_bytes);
+    bool ok = splat4d_stream_block(packed, palette_bytes, chunk, fn, ctx);
+    free(packed);
+    if (!ok)
+      return false;
   }
 
   uint64_t total = header_total_indices(&v->header);
@@ -1720,6 +1800,8 @@ void print_splat4D(const Splat4D *s, const uint32_t count) {
   printf("│ │ y %8.2f %8.2f    │ │\n", s->mu_y, s->sigma_y);
   printf("│ │ z %8.2f %8.2f    │ │\n", s->mu_z, s->sigma_z);
   printf("│ │ t %8.2f %8.2f    │ │\n", s->mu_t, s->sigma_t);
+  if (s->sigma_xy != 0.0f || s->sigma_xz != 0.0f || s->sigma_yz != 0.0f)
+    printf("│ │ cov %6.2f %6.2f %6.2f│ │\n", s->sigma_xy, s->sigma_xz, s->sigma_yz);
   printf("│ │ r %-18.2f   │ │\n", s->r);
   printf("│ │ g %-18.2f   │ │\n", s->g);
   printf("│ │ b %-18.2f   │ │\n", s->b);
@@ -1732,7 +1814,7 @@ Splat4DHeader create_splat4DHeader(uint32_t width, uint32_t height, uint32_t dep
                                    uint32_t pSize, uint32_t flags) {
   uint32_t sanitized = sanitize_flags(flags);
   return (Splat4DHeader){.magic = 0x3453504C,
-                         .version = {1, 0, 0, 0},
+                         .version = {1, 1, 0, 0}, // v0.2 palette layout
                          .width = width,
                          .height = height,
                          .depth = depth,
@@ -1926,9 +2008,6 @@ bool write_splat4DPalette(FILE *fp, const Splat4DPalette *p, uint32_t count, uin
   if (!fp || !p || !p->palette || count == 0)
     return false;
 
-  if (splat_precision_bits(flags) == 1) // Float32: verbatim
-    return fwrite(p->palette, sizeof(Splat4D), count, fp) == count;
-
   size_t entry_bytes = palette_entry_disk_bytes(flags);
   uint64_t bytes64 = 0;
   if (!checked_mul_u64((uint64_t)count, (uint64_t)entry_bytes, &bytes64) || bytes64 > SIZE_MAX)
@@ -1956,15 +2035,6 @@ bool read_splat4DPalette(FILE *fp, Splat4DPalette *p, uint32_t count, uint32_t f
   p->palette = malloc((size_t)mem_bytes);
   if (!p->palette)
     return false;
-
-  if (splat_precision_bits(flags) == 1) { // Float32: verbatim
-    if (fread(p->palette, sizeof(Splat4D), count, fp) != count) {
-      free(p->palette);
-      p->palette = NULL;
-      return false;
-    }
-    return true;
-  }
 
   size_t entry_bytes = palette_entry_disk_bytes(flags);
   uint64_t disk_bytes = 0;
@@ -2699,7 +2769,9 @@ bool image_to_video(const uint8_t *rgb, uint32_t w, uint32_t h, Splat4DVideo *ou
   uint32_t iw = (pal_n <= 256)     ? SPLAT_INDEX_WIDTH_8
                 : (pal_n <= 65536) ? SPLAT_INDEX_WIDTH_16
                                    : SPLAT_INDEX_WIDTH_32;
-  uint32_t flags = SPLAT_FLAG_PRECISION_FLOAT32 | (iw << SPLAT_FLAG_INDEX_WIDTH_SHIFT);
+  // Axis-aligned: each splat keeps its independent x and y spatial spread.
+  uint32_t flags = SPLAT_FLAG_PRECISION_FLOAT32 | (iw << SPLAT_FLAG_INDEX_WIDTH_SHIFT) |
+                   (SPLAT_SHAPE_AXIS_ALIGNED << SPLAT_FLAG_SPLAT_SHAPE_SHIFT);
   Splat4DHeader header = create_splat4DHeader(w, h, 1, 1, (uint32_t)pal_n, flags);
   *out = create_splat4DVideo(header, palette, index);
   return true;
