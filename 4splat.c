@@ -644,6 +644,89 @@ typedef struct {
 
 uint64_t header_total_indices(const Splat4DHeader *h);
 
+// --- fixed on-disk container layout -----------------------------------------
+//
+// The header and footer are serialized field-by-field to the exact byte layout
+// the format spec documents, independent of the host's struct padding and
+// endianness. Numeric fields are little-endian; the "4SPL"/"LPS4" fourcc tags
+// are written most-significant-byte first so the file reads as ASCII in order.
+#define SPLAT_HEADER_DISK_BYTES 32
+#define SPLAT_FOOTER_DISK_BYTES 16
+
+static void store_u32le(uint8_t *p, uint32_t v) {
+  p[0] = (uint8_t)v;
+  p[1] = (uint8_t)(v >> 8);
+  p[2] = (uint8_t)(v >> 16);
+  p[3] = (uint8_t)(v >> 24);
+}
+
+static void store_u64le(uint8_t *p, uint64_t v) {
+  for (int i = 0; i < 8; ++i)
+    p[i] = (uint8_t)(v >> (8 * i));
+}
+
+static void store_u32be(uint8_t *p, uint32_t v) {
+  p[0] = (uint8_t)(v >> 24);
+  p[1] = (uint8_t)(v >> 16);
+  p[2] = (uint8_t)(v >> 8);
+  p[3] = (uint8_t)v;
+}
+
+static uint32_t load_u32le(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint64_t load_u64le(const uint8_t *p) {
+  uint64_t v = 0;
+  for (int i = 0; i < 8; ++i)
+    v |= (uint64_t)p[i] << (8 * i);
+  return v;
+}
+
+static uint32_t load_u32be(const uint8_t *p) {
+  return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static void serialize_header(const Splat4DHeader *h, uint8_t out[SPLAT_HEADER_DISK_BYTES]) {
+  store_u32be(out + 0, h->magic); // "4SPL"
+  out[4] = h->version[0];
+  out[5] = h->version[1];
+  out[6] = h->version[2];
+  out[7] = h->version[3];
+  store_u32le(out + 8, h->width);
+  store_u32le(out + 12, h->height);
+  store_u32le(out + 16, h->depth);
+  store_u32le(out + 20, h->frames);
+  store_u32le(out + 24, h->pSize);
+  store_u32le(out + 28, h->flags);
+}
+
+static void deserialize_header(const uint8_t in[SPLAT_HEADER_DISK_BYTES], Splat4DHeader *h) {
+  h->magic = load_u32be(in + 0);
+  h->version[0] = in[4];
+  h->version[1] = in[5];
+  h->version[2] = in[6];
+  h->version[3] = in[7];
+  h->width = load_u32le(in + 8);
+  h->height = load_u32le(in + 12);
+  h->depth = load_u32le(in + 16);
+  h->frames = load_u32le(in + 20);
+  h->pSize = load_u32le(in + 24);
+  h->flags = load_u32le(in + 28);
+}
+
+static void serialize_footer(const Splat4DFooter *f, uint8_t out[SPLAT_FOOTER_DISK_BYTES]) {
+  store_u64le(out + 0, f->idxoffset);
+  store_u32le(out + 8, f->checksum);
+  store_u32be(out + 12, f->end); // "LPS4"
+}
+
+static void deserialize_footer(const uint8_t in[SPLAT_FOOTER_DISK_BYTES], Splat4DFooter *f) {
+  f->idxoffset = load_u64le(in + 0);
+  f->checksum = load_u32le(in + 8);
+  f->end = load_u32be(in + 12);
+}
+
 // utils //
 typedef struct {
   uint32_t v;
@@ -1448,7 +1531,11 @@ static bool splat4d_stream_video_payload(const Splat4DVideo *v, size_t chunk, Sp
   if (!v || !fn)
     return false;
 
-  if (!splat4d_stream_block((const uint8_t *)&v->header, sizeof v->header, chunk, fn, ctx))
+  // Stream the header in its on-disk form so the checksum covers exactly the
+  // bytes written to the file.
+  uint8_t header_bytes[SPLAT_HEADER_DISK_BYTES];
+  serialize_header(&v->header, header_bytes);
+  if (!splat4d_stream_block(header_bytes, sizeof header_bytes, chunk, fn, ctx))
     return false;
 
   size_t entry_bytes = palette_entry_disk_bytes(v->header.flags);
@@ -1588,7 +1675,7 @@ uint64_t compute_idxoffset_reverse(const Splat4DHeader *h) {
   uint64_t palette_bytes = (uint64_t)h->pSize * (uint64_t)palette_entry_disk_bytes(h->flags);
   uint8_t idx_width = get_index_width_bytes(h->flags);
   uint64_t index_bytes = total * idx_width;
-  uint64_t footer_bytes = sizeof(Splat4DFooter);
+  uint64_t footer_bytes = SPLAT_FOOTER_DISK_BYTES;
   uint64_t filesize = header_bytes + palette_bytes + index_bytes + footer_bytes;
   uint64_t offset = filesize - (footer_bytes + index_bytes);
   return offset;
@@ -1809,13 +1896,19 @@ void print_splat4DHeader(const Splat4DHeader *h) {
 bool write_splat4DHeader(FILE *fp, const Splat4DHeader *h) {
   if (!fp || !h)
     return false;
-  return fwrite(h, sizeof(Splat4DHeader), 1, fp) == 1;
+  uint8_t buf[SPLAT_HEADER_DISK_BYTES];
+  serialize_header(h, buf);
+  return fwrite(buf, 1, sizeof buf, fp) == sizeof buf;
 }
 
 bool read_splat4DHeader(FILE *fp, Splat4DHeader *h) {
   if (!fp || !h)
     return false;
-  return fread(h, sizeof(Splat4DHeader), 1, fp) == 1;
+  uint8_t buf[SPLAT_HEADER_DISK_BYTES];
+  if (fread(buf, 1, sizeof buf, fp) != sizeof buf)
+    return false;
+  deserialize_header(buf, h);
+  return true;
 }
 
 // palette
@@ -2072,13 +2165,19 @@ void print_splat4DFooter(const Splat4DFooter *f) {
 bool write_splat4DFooter(FILE *fp, const Splat4DFooter *f) {
   if (!fp || !f)
     return false;
-  return fwrite(f, sizeof(Splat4DFooter), 1, fp) == 1;
+  uint8_t buf[SPLAT_FOOTER_DISK_BYTES];
+  serialize_footer(f, buf);
+  return fwrite(buf, 1, sizeof buf, fp) == sizeof buf;
 }
 
 bool read_splat4DFooter(FILE *fp, Splat4DFooter *f) {
   if (!fp || !f)
     return false;
-  return fread(f, sizeof(Splat4DFooter), 1, fp) == 1;
+  uint8_t buf[SPLAT_FOOTER_DISK_BYTES];
+  if (fread(buf, 1, sizeof buf, fp) != sizeof buf)
+    return false;
+  deserialize_footer(buf, f);
+  return true;
 }
 
 // video
@@ -2284,13 +2383,13 @@ bool read_splat4DVideo(FILE *fp, Splat4DVideo *v) {
     }
     long file_end = ftell(fp);
     if (file_end < 0 || fseek(fp, index_start, SEEK_SET) != 0 ||
-        file_end < index_start + (long)sizeof(Splat4DFooter)) {
+        file_end < index_start + (long)SPLAT_FOOTER_DISK_BYTES) {
       LOG_ERROR("❌ Truncated compressed index\n");
       free(v->palette.palette);
       v->palette.palette = NULL;
       return false;
     }
-    size_t comp_len = (size_t)(file_end - index_start) - sizeof(Splat4DFooter);
+    size_t comp_len = (size_t)(file_end - index_start) - SPLAT_FOOTER_DISK_BYTES;
     if (!read_index_compressed(fp, &v->index, total, v->header.flags, comp_len, codec)) {
       LOG_ERROR("❌ Failed to decompress index\n");
       free(v->palette.palette);

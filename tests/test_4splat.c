@@ -337,7 +337,9 @@ static bool test_write_and_read_round_trip(void) {
                               original.header.pSize * sizeof(Splat4D)) == 0;
   bool index_match = memcmp(original.index.index, loaded.index.index,
                             header_total_indices(&original.header) * sizeof(uint64_t)) == 0;
-  bool footer_match = memcmp(&original.footer, &loaded.footer, sizeof(Splat4DFooter)) == 0;
+  bool footer_match = original.footer.idxoffset == loaded.footer.idxoffset &&
+                      original.footer.checksum == loaded.footer.checksum &&
+                      original.footer.end == loaded.footer.end;
 
   free_splat4DVideo(&loaded);
 
@@ -504,7 +506,9 @@ static bool test_read_footer_fails_on_short_file(void) {
     return false;
 
   Splat4DFooter footer = create_splat4DFooter(&(Splat4DHeader){0});
-  fwrite(&footer, sizeof(uint8_t), sizeof(Splat4DFooter) - 1, fp);
+  uint8_t buf[SPLAT_FOOTER_DISK_BYTES];
+  serialize_footer(&footer, buf);
+  fwrite(buf, sizeof(uint8_t), SPLAT_FOOTER_DISK_BYTES - 1, fp); // one byte short
   rewind(fp);
 
   Splat4DFooter out = {0};
@@ -548,8 +552,8 @@ static bool test_read_video_fails_on_truncated_index(void) {
   if (!fp)
     return false;
 
-  fwrite(&video.header, sizeof(Splat4DHeader), 1, fp);
-  fwrite(video.palette.palette, sizeof(Splat4D), video.header.pSize, fp);
+  write_splat4DHeader(fp, &video.header);
+  write_splat4DPalette(fp, &video.palette, video.header.pSize, video.header.flags);
   // Intentionally omit index/footers.
   rewind(fp);
 
@@ -575,10 +579,11 @@ static bool test_read_video_fails_on_crc_mismatch(void) {
 
   write_splat4DVideo(fp, &video);
 
-  // Corrupt checksum at end of file.
-  fseek(fp, -(long)sizeof(Splat4DFooter), SEEK_END);
-  uint32_t bad = video.footer.checksum ^ 0xFFFFFFFFu;
-  fwrite(&bad, sizeof(uint32_t), 1, fp);
+  // Corrupt the stored checksum (footer bytes 8..11).
+  fseek(fp, -(long)SPLAT_FOOTER_DISK_BYTES + 8, SEEK_END);
+  uint8_t bad[4];
+  store_u32le(bad, video.footer.checksum ^ 0xFFFFFFFFu);
+  fwrite(bad, sizeof bad, 1, fp);
   fflush(fp);
   rewind(fp);
 
@@ -606,11 +611,10 @@ static bool test_read_video_fails_on_invalid_footer_marker(void) {
     return false;
   }
 
-  // Corrupt the footer terminator.
-  fseek(fp, -(long)sizeof(Splat4DFooter), SEEK_END);
-  fseek(fp, (long)offsetof(Splat4DFooter, end), SEEK_CUR);
-  uint32_t invalid_end = 0;
-  fwrite(&invalid_end, sizeof(uint32_t), 1, fp);
+  // Corrupt the footer terminator (footer bytes 12..15).
+  fseek(fp, -(long)SPLAT_FOOTER_DISK_BYTES + 12, SEEK_END);
+  uint8_t invalid_end[4] = {0, 0, 0, 0};
+  fwrite(invalid_end, sizeof invalid_end, 1, fp);
   fflush(fp);
   rewind(fp);
 
