@@ -1,0 +1,4 @@
+# Build artifacts
+/4splat
+/tests/test_4splat
+/tests/fuzz_read

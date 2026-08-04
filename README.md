@@ -346,6 +346,23 @@ conversion endpoints with a clear diagnostic rather than being approximated.
 | `idxoffset_sanity_mismatch` | Checks the idxoffset sanity helpers catch mismatched offsets between header and footer. |
 | `header_defaults_to_float32_precision` | Verifies header construction defaults the precision flag to float32 when unspecified. |
 
+## Fuzzing
+
+`tests/fuzz_read.c` feeds arbitrary bytes to `read_splat4DVideo` — the main
+untrusted-input surface, since the reader sizes allocations from
+attacker-controlled header dimensions. The reader rejects any header whose
+declared palette/index sizes cannot fit the actual file (and caps a compressed
+index's decompressed size), so malformed input fails cheaply instead of
+attempting a huge allocation.
+
+```bash
+make fuzz && ./tests/fuzz_read tests/fuzz_corpus         # libFuzzer (clang + runtime)
+make fuzz-standalone && ./tests/fuzz_read corpus/*       # portable runner, any sanitizer
+```
+
+CI runs the standalone harness under AddressSanitizer + UBSan over the seed
+corpus plus random and header-mutated inputs on every push.
+
 ## Palette Explorer
 
 An exploratory visualization tool lives in `tools/visualize_4splat.py`. It parses a
