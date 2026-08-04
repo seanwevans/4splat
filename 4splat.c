@@ -180,6 +180,7 @@
 #define SPLAT_WITH_BROTLI
 #define SPLAT_WITH_ZSTD
 #define SPLAT_WITH_LZ4
+#define SPLAT_WITH_LCMS2
 #endif
 
 #ifdef SPLAT_WITH_ZLIB
@@ -200,6 +201,9 @@
 #endif
 #ifdef SPLAT_WITH_LZ4
 #include <lz4.h>
+#endif
+#ifdef SPLAT_WITH_LCMS2
+#include <lcms2.h>
 #endif
 
 #define LOG_ERROR(...) fprintf(stderr, __VA_ARGS__)
@@ -1078,6 +1082,125 @@ static bool splat_decompress(uint32_t codec, const uint8_t *in, size_t in_len, u
     return false;
   }
 }
+
+// --- color-space conversion (LittleCMS) -------------------------------------
+//
+// The header names the color space the palette RGB values live in. When the
+// lcms2 backend is compiled in, the palette colors can be converted between a
+// documented subset of those spaces; the color-space field is updated to match.
+// Spaces outside the subset (OKLab, the ACES and Rec.2100 variants, DCI-P3,
+// Rec.601) are rejected with a diagnostic rather than silently mishandled.
+#ifdef SPLAT_WITH_LCMS2
+static cmsToneCurve *splat_srgb_curve(void) {
+  // IEC 61966-2-1 sRGB transfer function as an ICC parametric type-4 curve.
+  cmsFloat64Number params[5] = {2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045};
+  return cmsBuildParametricToneCurve(NULL, 4, params);
+}
+
+static cmsHPROFILE splat_rgb_profile(cmsCIExyY white, cmsCIExyYTRIPLE primaries, double gamma) {
+  cmsToneCurve *tc = (gamma <= 0.0) ? splat_srgb_curve() : cmsBuildGamma(NULL, gamma);
+  if (!tc)
+    return NULL;
+  cmsToneCurve *curves[3] = {tc, tc, tc};
+  cmsHPROFILE profile = cmsCreateRGBProfile(&white, &primaries, curves);
+  cmsFreeToneCurve(tc);
+  return profile;
+}
+
+// Resolve a color space to an lcms profile and matching float pixel format.
+// Returns false for spaces this backend does not model.
+static bool splat_space_profile(uint32_t space, cmsHPROFILE *profile, cmsUInt32Number *format) {
+  const cmsCIExyY d65 = {0.3127, 0.3290, 1.0};
+  const cmsCIExyY d50 = {0.3457, 0.3585, 1.0};
+  switch (space) {
+  case SPLAT_COLOR_SRGB:
+  case SPLAT_COLOR_REC709: { // Rec.709 shares the sRGB primaries/white point
+    *profile = cmsCreate_sRGBProfile();
+    *format = TYPE_RGB_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_LINEAR_SRGB: {
+    cmsCIExyYTRIPLE p = {{0.640, 0.330, 1}, {0.300, 0.600, 1}, {0.150, 0.060, 1}};
+    *profile = splat_rgb_profile(d65, p, 1.0);
+    *format = TYPE_RGB_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_DISPLAY_P3: {
+    cmsCIExyYTRIPLE p = {{0.680, 0.320, 1}, {0.265, 0.690, 1}, {0.150, 0.060, 1}};
+    *profile = splat_rgb_profile(d65, p, 0.0); // sRGB transfer
+    *format = TYPE_RGB_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_REC2020: {
+    cmsCIExyYTRIPLE p = {{0.708, 0.292, 1}, {0.170, 0.797, 1}, {0.131, 0.046, 1}};
+    *profile = splat_rgb_profile(d65, p, 0.0);
+    *format = TYPE_RGB_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_PROPHOTO_RGB: {
+    cmsCIExyYTRIPLE p = {{0.7347, 0.2653, 1}, {0.1596, 0.8404, 1}, {0.0366, 0.0001, 1}};
+    *profile = splat_rgb_profile(d50, p, 1.8);
+    *format = TYPE_RGB_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_CIE_LAB: {
+    *profile = cmsCreateLab4Profile(NULL);
+    *format = TYPE_Lab_FLT;
+    return *profile != NULL;
+  }
+  case SPLAT_COLOR_CIE_XYZ_D65:
+  case SPLAT_COLOR_CIE_XYZ_D50:
+  case SPLAT_COLOR_CIE_XYZ_D65_ALT: {
+    *profile = cmsCreateXYZProfile();
+    *format = TYPE_XYZ_FLT;
+    return *profile != NULL;
+  }
+  default:
+    return false;
+  }
+}
+
+// Convert every palette entry's (r, g, b) from `from` to `to`. Non-RGB targets
+// (Lab, XYZ) leave their channel values in the r/g/b slots.
+static bool splat_convert_palette_colors(Splat4D *palette, uint32_t count, uint32_t from,
+                                         uint32_t to) {
+  if (from == to)
+    return true;
+
+  cmsHPROFILE in_profile = NULL, out_profile = NULL;
+  cmsUInt32Number in_format = 0, out_format = 0;
+  if (!splat_space_profile(from, &in_profile, &in_format)) {
+    LOG_ERROR("❌ Color-space conversion from %s is not supported\n",
+              splat_color_space_name((SplatColorSpace)from));
+    return false;
+  }
+  if (!splat_space_profile(to, &out_profile, &out_format)) {
+    LOG_ERROR("❌ Color-space conversion to %s is not supported\n",
+              splat_color_space_name((SplatColorSpace)to));
+    cmsCloseProfile(in_profile);
+    return false;
+  }
+
+  cmsHTRANSFORM xform = cmsCreateTransform(in_profile, in_format, out_profile, out_format,
+                                           INTENT_RELATIVE_COLORIMETRIC,
+                                           cmsFLAGS_BLACKPOINTCOMPENSATION | cmsFLAGS_NOOPTIMIZE);
+  cmsCloseProfile(in_profile);
+  cmsCloseProfile(out_profile);
+  if (!xform)
+    return false;
+
+  for (uint32_t i = 0; i < count; ++i) {
+    float in[3] = {palette[i].r, palette[i].g, palette[i].b};
+    float out[3];
+    cmsDoTransform(xform, in, out, 1);
+    palette[i].r = out[0];
+    palette[i].g = out[1];
+    palette[i].b = out[2];
+  }
+  cmsDeleteTransform(xform);
+  return true;
+}
+#endif // SPLAT_WITH_LCMS2
 
 // streaming helpers //
 typedef bool (*Splat4DChunkFn)(const uint8_t *chunk, size_t n, void *ctx);
@@ -2322,7 +2445,38 @@ static void print_usage(FILE *stream) {
           "  4splat encode --palette <palette.bin> --index <index.bin> --output <file.4spl> "
           "--width <w> --height <h> --depth <d> --frames <f> [--palette-size <n>] [--flags <n>]\n"
           "  4splat decode --input <file.4spl> [--palette <palette.bin>] [--index <index.bin>] "
-          "[--print] [--validate]\n");
+          "[--output <file.4spl>] [--to-color <space>] [--print] [--validate]\n");
+}
+
+// Parse a color-space name (as used on the command line) into its flag value.
+static bool parse_color_space_name(const char *name, uint32_t *out) {
+  static const struct {
+    const char *name;
+    uint32_t value;
+  } table[] = {
+      {"srgb", SPLAT_COLOR_SRGB},
+      {"linear-srgb", SPLAT_COLOR_LINEAR_SRGB},
+      {"oklab", SPLAT_COLOR_OKLAB},
+      {"display-p3", SPLAT_COLOR_DISPLAY_P3},
+      {"rec709", SPLAT_COLOR_REC709},
+      {"rec2020", SPLAT_COLOR_REC2020},
+      {"dci-p3", SPLAT_COLOR_DCI_P3},
+      {"aces-ap0", SPLAT_COLOR_ACES_AP0},
+      {"prophoto", SPLAT_COLOR_PROPHOTO_RGB},
+      {"rec2100", SPLAT_COLOR_REC2100},
+      {"lab", SPLAT_COLOR_CIE_LAB},
+      {"xyz-d65", SPLAT_COLOR_CIE_XYZ_D65},
+      {"acescg-ap1", SPLAT_COLOR_ACESCG_AP1},
+      {"rec601", SPLAT_COLOR_REC601},
+      {"xyz-d50", SPLAT_COLOR_CIE_XYZ_D50},
+  };
+  for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
+    if (strcmp(name, table[i].name) == 0) {
+      *out = table[i].value;
+      return true;
+    }
+  }
+  return false;
 }
 
 static bool parse_u32(const char *arg, uint32_t *out) {
@@ -2602,6 +2756,8 @@ static int command_decode(int argc, char **argv) {
   const char *input_path = NULL;
   const char *palette_out = NULL;
   const char *index_out = NULL;
+  const char *output_path = NULL;
+  const char *to_color = NULL;
   bool print_summary = false;
   bool do_validate = false;
 
@@ -2613,6 +2769,10 @@ static int command_decode(int argc, char **argv) {
       palette_out = argv[++i];
     } else if (strcmp(arg, "--index") == 0 && i + 1 < argc) {
       index_out = argv[++i];
+    } else if (strcmp(arg, "--output") == 0 && i + 1 < argc) {
+      output_path = argv[++i];
+    } else if (strcmp(arg, "--to-color") == 0 && i + 1 < argc) {
+      to_color = argv[++i];
     } else if (strcmp(arg, "--print") == 0) {
       print_summary = true;
     } else if (strcmp(arg, "--validate") == 0) {
@@ -2648,8 +2808,50 @@ static int command_decode(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
+  if (to_color) {
+    uint32_t target = 0;
+    if (!parse_color_space_name(to_color, &target)) {
+      LOG_ERROR("❌ Unknown color space '%s'\n", to_color);
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
+#ifdef SPLAT_WITH_LCMS2
+    uint32_t source =
+        (video.header.flags & SPLAT_FLAG_COLOR_SPACE_MASK) >> SPLAT_FLAG_COLOR_SPACE_SHIFT;
+    if (!splat_convert_palette_colors(video.palette.palette, video.header.pSize, source, target)) {
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
+    video.header.flags = (video.header.flags & ~SPLAT_FLAG_COLOR_SPACE_MASK) |
+                         (target << SPLAT_FLAG_COLOR_SPACE_SHIFT);
+    video.footer.checksum = compute_video_checksum(&video);
+    printf("✅ Converted palette to %s\n", splat_color_space_name((SplatColorSpace)target));
+#else
+    LOG_ERROR("❌ Color-space conversion requires a build with lcms2 (SPLAT_WITH_LCMS2)\n");
+    free_splat4DVideo(&video);
+    return EXIT_FAILURE;
+#endif
+  }
+
   if (print_summary)
     print_splat4DVideo(&video);
+
+  if (output_path) {
+    FILE *out = fopen(output_path, "wb");
+    if (!out) {
+      LOG_ERROR("❌ Unable to create '%s': %s\n", output_path, strerror(errno));
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
+    bool wrote = write_splat4DVideo(out, &video);
+    fclose(out);
+    if (!wrote) {
+      LOG_ERROR("❌ Failed to write '%s'\n", output_path);
+      free_splat4DVideo(&video);
+      return EXIT_FAILURE;
+    }
+    printf("✅ Wrote 4Splat file to '%s'\n", output_path);
+  }
 
   if (palette_out && !save_palette_to_file(palette_out, &video)) {
     free_splat4DVideo(&video);

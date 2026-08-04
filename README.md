@@ -204,6 +204,22 @@ float16, float32 (default) or float64 — and every descriptive flag field (inde
 width, splat shape, color space, interpolation, sort order and the metadata byte)
 round-trips unchanged.
 
+## Color-space conversion
+
+When built with LittleCMS (`SPLAT_WITH_LCMS2`, included in `make`), `decode` can
+convert the palette colors from the space named in the header to another space
+and update the color-space field:
+
+```bash
+4splat decode --input in.4spl --to-color rec2020 --output out.4spl
+```
+
+Supported target/source spaces are `srgb`, `linear-srgb`, `display-p3`,
+`rec709`, `rec2020`, `prophoto`, `lab`, `xyz-d65` and `xyz-d50`. The remaining
+enumerated spaces (OKLab, the ACES and Rec.2100/Rec.601/DCI-P3 variants) are
+recognized as tags and round-trip in the container, but are refused as
+conversion endpoints with a clear diagnostic rather than being approximated.
+
 ## Test Suite
 
 | Test | Description |
