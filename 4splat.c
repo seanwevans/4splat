@@ -169,16 +169,40 @@
 #define LOG_ERROR(...) fprintf(stderr, __VA_ARGS__)
 #define SAFE_SNPRINTF(...) snprintf(__VA_ARGS__)
 
-enum {
-  SPLAT_FLAG_ENDIAN_BIG = 1u << 0,
-  SPLAT_FLAG_PRECISION_SHIFT = 2,
-  SPLAT_FLAG_PRECISION_MASK = 0x3u << SPLAT_FLAG_PRECISION_SHIFT,
-  SPLAT_FLAG_PRECISION_FLOAT16 = 0x0u << SPLAT_FLAG_PRECISION_SHIFT,
-  SPLAT_FLAG_PRECISION_FLOAT32 = 0x1u << SPLAT_FLAG_PRECISION_SHIFT,
-  SPLAT_FLAG_PRECISION_FLOAT64 = 0x2u << SPLAT_FLAG_PRECISION_SHIFT,
-  SPLAT_FLAG_PRECISION_FLOAT128 = 0x3u << SPLAT_FLAG_PRECISION_SHIFT,
-  SPLAT_FLAG_SUPPORTED_MASK = SPLAT_FLAG_ENDIAN_BIG | SPLAT_FLAG_PRECISION_MASK,
-};
+/* Header flag-word field layout (little-endian, see the spec at the top of this
+ * file). Defined as macros rather than an enum because the metadata mask
+ * (0xFF000000) does not fit the int range that ISO C requires for enumerators. */
+#define SPLAT_FLAG_ENDIAN_BIG (1u << 0)
+
+#define SPLAT_FLAG_SORTED (1u << 1)
+
+#define SPLAT_FLAG_PRECISION_SHIFT 2
+#define SPLAT_FLAG_PRECISION_MASK (0x3u << SPLAT_FLAG_PRECISION_SHIFT)
+#define SPLAT_FLAG_PRECISION_FLOAT16 (0x0u << SPLAT_FLAG_PRECISION_SHIFT)
+#define SPLAT_FLAG_PRECISION_FLOAT32 (0x1u << SPLAT_FLAG_PRECISION_SHIFT)
+#define SPLAT_FLAG_PRECISION_FLOAT64 (0x2u << SPLAT_FLAG_PRECISION_SHIFT)
+#define SPLAT_FLAG_PRECISION_FLOAT128 (0x3u << SPLAT_FLAG_PRECISION_SHIFT)
+
+#define SPLAT_FLAG_COMPRESSION_SHIFT 4
+#define SPLAT_FLAG_COMPRESSION_MASK (0xFu << SPLAT_FLAG_COMPRESSION_SHIFT)
+
+#define SPLAT_FLAG_INDEX_WIDTH_SHIFT 8
+#define SPLAT_FLAG_INDEX_WIDTH_MASK (0x3u << SPLAT_FLAG_INDEX_WIDTH_SHIFT)
+
+#define SPLAT_FLAG_SPLAT_SHAPE_SHIFT 10
+#define SPLAT_FLAG_SPLAT_SHAPE_MASK (0x3u << SPLAT_FLAG_SPLAT_SHAPE_SHIFT)
+
+#define SPLAT_FLAG_COLOR_SPACE_SHIFT 12
+#define SPLAT_FLAG_COLOR_SPACE_MASK (0xFu << SPLAT_FLAG_COLOR_SPACE_SHIFT)
+
+#define SPLAT_FLAG_INTERP_SHIFT 16
+#define SPLAT_FLAG_INTERP_MASK (0xFu << SPLAT_FLAG_INTERP_SHIFT)
+
+#define SPLAT_FLAG_ENCRYPTION_SHIFT 20
+#define SPLAT_FLAG_ENCRYPTION_MASK (0xFu << SPLAT_FLAG_ENCRYPTION_SHIFT)
+
+#define SPLAT_FLAG_METADATA_SHIFT 24
+#define SPLAT_FLAG_METADATA_MASK (0xFFu << SPLAT_FLAG_METADATA_SHIFT)
 
 static uint32_t sanitize_flags(uint32_t flags) {
   // 4Splat files are always little-endian.
@@ -190,12 +214,12 @@ static uint32_t sanitize_flags(uint32_t flags) {
   return flags;
 }
 
+// Validate that a flag word describes a file this build can decode. Fields that
+// only describe the payload (index width, splat shape, color space,
+// interpolation, sort order and the metadata byte) accept every value and are
+// preserved verbatim across a read/write round-trip; fields that change how the
+// bytes are interpreted are checked against what the codec implements.
 static bool flags_supported(uint32_t flags) {
-  if (flags & ~SPLAT_FLAG_SUPPORTED_MASK) {
-    LOG_ERROR("❌ Unsupported flag combination (0x%08X)\n", flags);
-    return false;
-  }
-
   if (flags & SPLAT_FLAG_ENDIAN_BIG) {
     LOG_ERROR("❌ Big-endian 4Splat files are unsupported\n");
     return false;
@@ -204,6 +228,24 @@ static bool flags_supported(uint32_t flags) {
   uint32_t precision = flags & SPLAT_FLAG_PRECISION_MASK;
   if (precision != SPLAT_FLAG_PRECISION_FLOAT32) {
     LOG_ERROR("❌ Unsupported precision flag (0x%08X)\n", precision);
+    return false;
+  }
+
+  uint32_t compression = flags & SPLAT_FLAG_COMPRESSION_MASK;
+  if (compression != 0) {
+    LOG_ERROR("❌ Unsupported compression scheme (0x%08X)\n", compression);
+    return false;
+  }
+
+  uint32_t splat_shape = (flags & SPLAT_FLAG_SPLAT_SHAPE_MASK) >> SPLAT_FLAG_SPLAT_SHAPE_SHIFT;
+  if (splat_shape == 3) { // reserved
+    LOG_ERROR("❌ Reserved splat shape value\n");
+    return false;
+  }
+
+  uint32_t encryption = (flags & SPLAT_FLAG_ENCRYPTION_MASK) >> SPLAT_FLAG_ENCRYPTION_SHIFT;
+  if (encryption != 0) {
+    LOG_ERROR("❌ Encrypted 4Splat files are unsupported\n");
     return false;
   }
 
