@@ -31,7 +31,7 @@ from matplotlib.widgets import CheckButtons, Slider
 HEADER_STRUCT = struct.Struct("<4s4B6I")
 PALETTE_ENTRY_FLOATS = 12
 PALETTE_ENTRY_SIZE = PALETTE_ENTRY_FLOATS * 4
-FOOTER_STRUCT = struct.Struct("<I4xQ4s4x")
+FOOTER_STRUCT = struct.Struct("<QI4s")
 INDEX_WIDTH_LOOKUP = {0: 1, 1: 2, 2: 4, 3: 8}
 
 
@@ -162,7 +162,7 @@ class FourSplatParser:
         version = unpacked[1:5]
         width, height, depth, frames, palette_size, flags = unpacked[5:11]
 
-        if magic != b"LPS4":
+        if magic != b"4SPL":
             raise ValueError(f"Unexpected magic: {magic!r}")
         if version[0] != 1:
             raise ValueError(f"Unsupported major version: {version[0]}")
@@ -228,9 +228,9 @@ class FourSplatParser:
         if len(data) < offset + FOOTER_STRUCT.size:
             raise ValueError("Footer truncated")
 
-        checksum, idxoffset, end_ascii = FOOTER_STRUCT.unpack_from(data, offset)
+        idxoffset, checksum, end_ascii = FOOTER_STRUCT.unpack_from(data, offset)
 
-        if end_ascii != b"4SPL":
+        if end_ascii != b"LPS4":
             raise ValueError(f"Unexpected footer terminator: {end_ascii!r}")
         return idxoffset, checksum
 

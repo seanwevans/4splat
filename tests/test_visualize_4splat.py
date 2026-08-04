@@ -22,7 +22,7 @@ from visualize_4splat import (
 
 def test_foursplat_header():
     header = FourSplatHeader(
-        magic=b"LPS4",
+        magic=b"4SPL",
         version=(1, 0, 0, 0),
         width=10,
         height=10,
@@ -39,7 +39,7 @@ def test_foursplat_header():
 
 def test_foursplat_header_unsupported_index_width():
     header = FourSplatHeader(
-        magic=b"LPS4",
+        magic=b"4SPL",
         version=(1, 0, 0, 0),
         width=10,
         height=10,
@@ -87,7 +87,7 @@ def test_palette_entry():
 
 def test_foursplat_video():
     header = FourSplatHeader(
-        magic=b"LPS4",
+        magic=b"4SPL",
         version=(1, 0, 0, 0),
         width=2,
         height=2,
@@ -155,7 +155,7 @@ def test_foursplat_video():
 
 
 def create_dummy_4splat_data(
-    magic=b"LPS4",
+    magic=b"4SPL",
     version=(1, 0, 0, 0),
     width=2,
     height=2,
@@ -204,8 +204,8 @@ def create_dummy_4splat_data(
     else:
         indices = struct.pack(f"<{total_voxels}Q", *[0] * total_voxels)
 
-    # FOOTER: <I4xQ4s4x (24 bytes)
-    footer = struct.pack("<I4xQ4s4x", checksum, idxoffset, b"4SPL")
+    # FOOTER: <QI4s (16 bytes): idxoffset, checksum, "LPS4"
+    footer = struct.pack("<QI4s", idxoffset, checksum, b"LPS4")
 
     return header + palette + indices + footer
 
@@ -218,7 +218,7 @@ def test_foursplat_parser_happy_path(tmp_path):
     parser = FourSplatParser(file_path)
     video = parser.parse()
 
-    assert video.header.magic == b"LPS4"
+    assert video.header.magic == b"4SPL"
     assert video.header.width == 2
     assert video.header.height == 2
     assert len(video.palette) == 1
@@ -296,9 +296,9 @@ def test_foursplat_parser_truncated_footer(tmp_path):
     file_path = tmp_path / "test.4spl"
 
     # header=32, palette=48, index=4 -> 84 bytes.
-    # footer needs 24 bytes, ends at 108.
-    # let's truncate at 100.
-    file_path.write_bytes(data[:100])
+    # footer needs 16 bytes, ends at 100.
+    # truncate mid-footer at 90.
+    file_path.write_bytes(data[:90])
     parser = FourSplatParser(file_path)
     with pytest.raises(ValueError, match="Footer truncated"):
         parser.parse()
@@ -308,12 +308,10 @@ def test_foursplat_parser_invalid_footer_marker(tmp_path):
     # Alter the last bytes which contain "4SPL"
     data = bytearray(create_dummy_4splat_data())
 
-    # But wait, struct footer is unpacked using struct.unpack_from(data, offset).
-    # The offset is HEADER_STRUCT.size + palette_bytes + idx_bytes.
-    # 32 + 48 + 4 = 84.
-    # Struct is <I4xQ4s4x (24 bytes). The 4s is from 84 + 16 to 84 + 19.
-    # Let's just modify the original data. The '4SPL' is at offset 84 + 4 + 4 + 8 = 100.
-    data[100:104] = b"BAD4"
+    # Footer starts at HEADER(32) + palette(48) + index(4) = 84.
+    # Struct is <QI4s (16 bytes): idxoffset(8) + checksum(4) + end(4),
+    # so the "LPS4" terminator is at 84 + 12 = 96.
+    data[96:100] = b"BAD4"
     file_path = tmp_path / "test.4spl"
     file_path.write_bytes(data)
 
