@@ -278,7 +278,16 @@ pseudo-GIF — and shares the same code path.
 # video (frames share one palette)
 4splat encode-video [--compress <scheme>] [--colors <N>] out.4spl frame0.ppm frame1.ppm ...
 4splat decode-video out.4spl restored_        # writes restored_0000.ppm, ...
+
+# volume (a stack of z-slices; depth > 1, frames = 1)
+4splat encode-volume [--compress <scheme>] [--colors <N>] vol.4spl slice0.ppm slice1.ppm ...
+4splat decode-volume vol.4spl restored_       # writes restored_0000.ppm, ...
 ```
+
+All four codecs share one implementation over the format's `(x, y, z, t)` grid:
+an image is `depth = frames = 1`, a video is `depth = 1, frames = N`, and a
+volume is `depth = N, frames = 1`. A volume's splats carry real `mu_z`/`sigma_z`
+from the slices each color occupies, just as a video's carry `mu_t`/`sigma_t`.
 
 Input/output is binary PPM (`P6`, maxval 255); all frames must share dimensions.
 `--compress` (e.g. `zstd`, `rle`) compresses the index — a 2-color checkerboard

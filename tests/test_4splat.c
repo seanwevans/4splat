@@ -1465,6 +1465,47 @@ static bool test_quantize_passthrough_within_budget(void) {
   return ok;
 }
 
+static bool test_volume_round_trip(void) {
+  // Two 2x1 slices; distinct colors across the stack -> palette of 3.
+  uint8_t s0[6] = {255, 0, 0, 0, 255, 0}; // red, green (z=0)
+  uint8_t s1[6] = {0, 0, 255, 0, 0, 255}; // blue, blue (z=1)
+  const uint8_t *slices[2] = {s0, s1};
+  Splat4DVideo v;
+  if (!stack_to_video_quantized(slices, 2, 1, 2, 1, 0, &v))
+    return false;
+
+  bool ok = v.header.depth == 2 && v.header.frames == 1 && v.header.width == 2 &&
+            v.header.height == 1 && v.header.pSize == 3;
+  uint8_t **rec = NULL;
+  uint32_t ns = 0, w = 0, h = 0;
+  if (ok)
+    ok = video_to_slices(&v, &rec, &ns, &w, &h);
+  if (ok)
+    ok = ns == 2 && memcmp(rec[0], s0, 6) == 0 && memcmp(rec[1], s1, 6) == 0;
+  if (rec) {
+    for (uint32_t s = 0; s < ns; ++s)
+      free(rec[s]);
+    free(rec);
+  }
+  free_splat4DVideo(&v);
+  return ok;
+}
+
+static bool test_volume_populates_mu_z(void) {
+  // 1x1 stack: red in slice z=0, green in slice z=1.
+  uint8_t s0[3] = {255, 0, 0};
+  uint8_t s1[3] = {0, 255, 0};
+  const uint8_t *slices[2] = {s0, s1};
+  Splat4DVideo v;
+  if (!stack_to_video_quantized(slices, 2, 1, 1, 1, 0, &v))
+    return false;
+  // pass 1 sees slice 0 first, so red is palette[0] (z=0), green palette[1] (z=1).
+  bool ok = v.header.depth == 2 && v.header.pSize == 2 && v.palette.palette[0].mu_z == 0.0f &&
+            v.palette.palette[1].mu_z == 1.0f && v.palette.palette[0].mu_t == 0.0f;
+  free_splat4DVideo(&v);
+  return ok;
+}
+
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
@@ -1532,6 +1573,8 @@ static test_case TESTS[] = {
     {"image_is_single_frame_video", test_image_is_single_frame_video},
     {"quantize_reduces_palette", test_quantize_reduces_palette},
     {"quantize_passthrough_within_budget", test_quantize_passthrough_within_budget},
+    {"volume_round_trip", test_volume_round_trip},
+    {"volume_populates_mu_z", test_volume_populates_mu_z},
     {"golden_conformance_vector", test_golden_conformance_vector},
     {"golden_vector_reads_back", test_golden_vector_reads_back},
     {"palette_entry_disk_bytes_by_shape", test_palette_entry_disk_bytes_by_shape},
