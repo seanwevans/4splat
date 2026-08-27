@@ -2,3 +2,7 @@
 /4splat
 /tests/test_4splat
 /tests/fuzz_read
+
+# Python bytecode
+__pycache__/
+*.pyc
