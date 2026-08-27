@@ -317,6 +317,91 @@ ACES and Rec.2100/Rec.601/DCI-P3 variants) are recognized as tags and round-trip
 in the container, but are refused as conversion endpoints with a clear
 diagnostic rather than being approximated.
 
+## Benchmarks against existing formats
+
+`tools/benchmark.py` encodes the same pixels with `4splat` and with established
+lossless formats, then reports the sizes side by side. It needs nothing beyond
+the standard library: PNG, GIF and QOI are implemented in `tools/refcodecs.py`,
+and gzip/bzip2/xz come from Python's own modules.
+
+```bash
+make bench          # quick subset, whichever schemes this build carries
+make bench-full     # every clip, every scheme, plus a lossy --colors 64 run
+
+python3 tools/benchmark.py --list                     # show the synthetic corpus
+python3 tools/benchmark.py --corpus sprite,bounce     # pick clips
+python3 tools/benchmark.py --input shots/ frame.ppm   # your own P6 files
+python3 tools/benchmark.py --colors 64 --json bench.json --csv bench.csv
+```
+
+Contenders, all lossless unless marked:
+
+| Entry | What it is |
+| --- | --- |
+| `raw RGB` | the uncompressed pixels - the denominator for "vs raw" |
+| `gzip` / `bzip2` / `xz` | general-purpose compressors over the raw pixels |
+| `PNG` | truecolor PNG with per-scanline adaptive filtering |
+| `PNG8` | indexed PNG, when the clip has ≤256 colors |
+| `GIF` | GIF89a with one global color table, animated for multi-frame clips |
+| `QOI` | Quite OK Image v1.0, summed over frames |
+| `4splat` | one row per compression scheme, plus `--colors N` runs scored by PSNR |
+
+Every entry is decoded again and compared with the source, so a row only
+reports a size for a file that provably decodes back to the original; a
+`--colors N` row is scored in dB instead. The harness exits non-zero if
+anything that claims to be lossless is not, which makes it a round-trip test
+of the codec as well as a size comparison.
+
+### Results
+
+From `make bench-full` on the full-featured build (128×128 images, 64×64×12 and
+96×64×8 clips; smaller is better):
+
+| Clip | Colors | Best `.4spl` | PNG | GIF | QOI | xz(raw) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `checkerboard` 2-color pattern | 2 | **176** (brotli) | 381 | 768 | 4,094 | 188 |
+| `sprite` 16-color pixel art | 16 | **1,026** (brotli) | 1,025 | 1,122 | 1,906 | 492 |
+| `bounce` 12 frames, moving sprite | 3 | **313** (brotli) | 3,086 | 1,803 | 2,365 | 344 |
+| `screencast` 8 frames, static UI | 4 | **1,262** (brotli) | 10,668 | 6,278 | 21,867 | 1,400 |
+| `photo` continuous tone | 11,922 | 592,973 (brotli) | **22,596** | n/a | 29,331 | 32,504 |
+| `gradient` smooth ramp | 16,384 | 791,819 (bzip2) | **261** | n/a | 33,043 | 37,256 |
+| `noise` random RGB | 4,095 | 198,281 (bzip2) | 12,420 | n/a | 16,398 | **12,348** |
+
+What the numbers say:
+
+* **Low-color content is where the format is competitive.** On the two-color
+  checkerboard `.4spl` is less than half of PNG and under a quarter of GIF. On
+  the video clips the global palette pays off exactly as intended: `screencast`
+  is 8.5× smaller than PNG and 5× smaller than an animated GIF, `bounce` 10×
+  and 5.8×. Pixel art lands level with PNG and slightly ahead of GIF.
+* **Cost per color dominates everything else.** A palette entry is 12 floats -
+  48 bytes at the default float32 precision - so an exact palette costs
+  `48 × distinct_colors` bytes before a single index is written. At 11,922
+  colors that is 572 KB of palette against a 49 KB image, which is the whole
+  story of the `photo`, `gradient` and `noise` rows. The header allows float16,
+  which would halve it, but `encode-image`/`encode-video` do not expose the
+  precision flag yet.
+* **`--colors N` is what makes photographic content viable.** Quantizing
+  `photo` to 64 colors drops it from 593 KB to 9.2 KB - 2.4× smaller than PNG -
+  at 36.9 dB PSNR, and to 4.5 KB at 16 colors (32.1 dB).
+* **The index compresses well, and the choice of scheme matters less than
+  the palette does.** Brotli wins nearly every clip, but zlib stays within
+  about 30% of it everywhere, while RLE - the only scheme in the
+  dependency-free build - trails by 2.5-24× on the low-color clips. Plain `xz`
+  over the raw pixels is a strong baseline: `.4spl` beats it on the
+  checkerboard and both video clips, and loses on everything else.
+
+Re-run the numbers yourself with `make bench-full`; they are recomputed from
+the corpus, not stored.
+
+The harness and its reference codecs have their own test suite - round trips
+through every PNG filter, GIF's LZW table overflow and each QOI opcode, plus an
+end-to-end run against the built binary:
+
+```bash
+python3 -m pytest tests/test_benchmark.py
+```
+
 ## Test Suite
 
 | Test | Description |
