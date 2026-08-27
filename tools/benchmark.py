@@ -85,13 +85,19 @@ DEFAULT_SCHEMES = ("none", "rle", "zlib", "xz", "brotli", "zstd")
 
 @dataclass
 class Clip:
-    """A benchmark input: one or more equally sized RGB frames."""
+    """A benchmark input: one or more equally sized RGB frames.
+
+    ``axis`` says what the extra frames mean - ``"time"`` for a video, or
+    ``"depth"`` for a stack of z-slices, which the codec stores as a volume
+    (``depth = N, frames = 1``) rather than as a sequence.
+    """
 
     name: str
     width: int
     height: int
     frames: List[bytes]
     description: str = ""
+    axis: str = "time"
 
     @property
     def raw_bytes(self) -> int:
@@ -107,7 +113,15 @@ class Clip:
 
     @property
     def kind(self) -> str:
-        return "image" if len(self.frames) == 1 else "video"
+        if len(self.frames) == 1:
+            return "image"
+        return "volume" if self.axis == "depth" else "video"
+
+    @property
+    def unit(self) -> str:
+        """What one entry of ``frames`` is called in reports."""
+
+        return "slices" if self.axis == "depth" else "frames"
 
 
 def _flat(width: int, height: int, shade: Callable[[int, int], Tuple[int, int, int]]) -> bytes:
@@ -379,7 +393,12 @@ class SplatRunner:
                 path.write_bytes(write_ppm(clip.width, clip.height, frame))
             frame_paths.append(str(path))
 
-        args: List[str] = ["encode-image" if clip.kind == "image" else "encode-video"]
+        commands = {
+            "image": "encode-image",
+            "video": "encode-video",
+            "volume": "encode-volume",
+        }
+        args: List[str] = [commands[clip.kind]]
         if scheme != "none":
             args += ["--compress", scheme]
         if colors:
@@ -400,7 +419,8 @@ class SplatRunner:
             if self._run(["decode-image", str(path), str(out)]).returncode != 0:
                 return None
             return [read_ppm(out.read_bytes())[2]]
-        if self._run(["decode-video", str(path), str(prefix)]).returncode != 0:
+        command = "decode-volume" if clip.kind == "volume" else "decode-video"
+        if self._run([command, str(path), str(prefix)]).returncode != 0:
             return None
         frames = []
         for i in range(len(clip.frames)):
@@ -605,7 +625,11 @@ def render_markdown(clips: Sequence[Clip], results: Sequence[Result], notes: str
         lines.append(
             f"### `{clip.name}` - {clip.description}, "
             f"{clip.width}x{clip.height}"
-            + (f" x {len(clip.frames)} frames" if clip.kind == "video" else "")
+            + (
+                f" x {len(clip.frames)} {clip.unit}"
+                if len(clip.frames) > 1
+                else ""
+            )
             + f", {clip.colors} colors"
         )
         lines.append("")
@@ -764,7 +788,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for name, builder in CORPUS_BUILDERS.items():
             clip = builder()
             size = f"{clip.width}x{clip.height}"
-            if clip.kind == "video":
+            if len(clip.frames) > 1:
                 size += f" x{len(clip.frames)}"
             print(f"{name:<13} {size:<14} {clip.colors:>6} colors  {clip.description}")
         return 0

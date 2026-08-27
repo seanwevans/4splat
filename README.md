@@ -402,6 +402,84 @@ end-to-end run against the built binary:
 python3 -m pytest tests/test_benchmark.py
 ```
 
+## Volumetric benchmark against 3D formats
+
+The comparison above pits `.4spl` against 2D image formats. `tools/benchmark_volumes.py`
+is the separate, volumetric one: a stack of z-slices encoded with
+`encode-volume` against the containers built to hold a whole `(x, y, z)` grid
+as a single object.
+
+```bash
+make bench-volumes                                    # every volume, every scheme
+
+python3 tools/benchmark_volumes.py --list             # show the synthetic volumes
+python3 tools/benchmark_volumes.py --corpus labels    # pick one
+python3 tools/benchmark_volumes.py --input slices/    # your own stack of P6 slices
+```
+
+| Entry | What it is |
+| --- | --- |
+| `NIfTI` | NIfTI-1 single-file volume (`n+1`, `DT_RGB24`), plain and as `.nii.gz` |
+| `NRRD` | NRRD with `gzip` encoding - the ITK / 3D Slicer format |
+| `MetaImage` | `.mha` with `CompressedData = True` (zlib) |
+| `TIFF stack` | multi-page TIFF: Deflate RGB pages, or palette pages sharing one `ColorMap` |
+| `PNG` / `PNG8` / `QOI` | one file per slice - what you get without a volumetric container |
+| `GIF` | the slices as animation frames, sharing a global color table |
+| `gzip` / `bzip2` / `xz` | general-purpose compressors over the raw voxel grid |
+| `4splat` | `encode-volume`, one row per scheme, plus lossy `--colors N` runs |
+
+These are real files, not approximations: the reference encoders in
+`tools/refvolumes.py` were cross-checked during development against the
+canonical readers for each format - `nibabel`, `pynrrd`, ITK (SimpleITK) and
+Pillow - and every size in the table below was decoded back and compared voxel
+for voxel by the harness itself.
+
+### Results
+
+From `make bench-volumes` (all sizes in bytes; smaller is better):
+
+| Volume | Colors | Best `.4spl` | NIfTI `.nii.gz` | NRRD | MetaImage | TIFF (palette) | PNG per slice | GIF |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `labels` 64×64×24, segmentation map | 6 | **1,771** (brotli) | 3,077 | 3,255 | 3,300 | 7,583 | 8,010 | 5,126 |
+| `angio` 64×64×24, sparse structures | 3 | **1,165** (bzip2) | 2,057 | 2,225 | 2,270 | 7,158 | 8,118 | 3,826 |
+| `voxel` 64×64×20, blocky terrain | 9 | **2,868** (lzma) | 4,593 | 4,764 | 4,809 | 8,294 | 12,211 | 13,454 |
+| `ct` 64×64×16, continuous tone | 256 | 46,211 (bzip2) | 59,826 | 60,013 | 60,059 | 55,245 | **47,543** | 60,139 |
+
+This is the format playing to its strengths, and the margins are much wider
+than in 2D:
+
+* **Against the volumetric containers it wins outright on structured data** -
+  1.6-2.0× smaller than `.nii.gz`, NRRD and MetaImage on `labels`, `angio` and
+  `voxel`, and 1.3× on continuous-tone `ct`. Those formats compress the raw
+  voxel bytes with a general-purpose codec; `.4spl` replaces every voxel with a
+  one-byte palette index first, so the stream those codecs see is a third the
+  size before they start.
+* **Against per-slice storage the gap is 4-7×** (`labels` 8,010 → 1,771,
+  `voxel` 12,211 → 2,868, `angio` 8,118 → 1,165). Nothing per-slice can
+  amortize a palette across depth, which is precisely what the format is for.
+* **TIFF is the only mainstream contender with the same idea**, and a palette
+  stack with a shared `ColorMap` is its best showing - but it still stores one
+  Deflate stream per page, so it lands 2.9-6.1× behind on the structured
+  volumes (and 1.2× behind on `ct`).
+* **The 256-color `ct` volume is the boundary.** Palette overhead
+  (48 bytes per color) plus one index per voxel stops paying against a
+  well-filtered per-slice PNG. `--colors 32` takes it to 15,651 at 41.1 dB, 3×
+  smaller than PNG, if lossy is acceptable.
+* **`bzip2` over raw voxels remains a stubborn baseline** - it ties `.4spl` on
+  `labels` and beats it on `angio` and `ct`. Structured 3D data has enormous
+  redundancy that a block-sorting compressor finds without knowing anything
+  about the grid.
+
+### Reachable today: 3D, not 4D
+
+`encode-volume` covers `depth = N, frames = 1`. The codec core already handles
+the full 4D case - `stack_to_video_quantized()` takes `depth × frames` slices
+in t-major, z-minor order, and the header has always carried both fields - but
+no CLI command feeds it both axes, so a time-varying volume can only be built
+through the low-level `encode` with a hand-made palette and index. That is the
+one gap between the format's stated `(x, y, z, frame)` model and what can be
+benchmarked here.
+
 ## Test Suite
 
 | Test | Description |
