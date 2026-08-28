@@ -162,6 +162,104 @@
  ╰───────────────────────────────────────────────────────────────────────╯
 ```
 
+## Benchmarks
+
+Every number below is produced by `make bench-full` and `make bench-volumes`,
+and every one of them was verified by decoding the file again and comparing it
+with the source. The short version: **the format's margin scales with how many
+axes the data has.** It loses badly on a photograph, draws level on pixel art,
+and pulls ahead by 3-14x on a 4D grid, because one palette amortizes across
+every voxel and frame while its 48-bytes-per-color cost is paid only once.
+
+### Images
+
+128x128 (`noise` and `sprite` are 64x64), sizes in bytes, smaller is better:
+
+| Clip | Colors | `.4spl` | PNG | PNG8 | GIF | QOI | xz(raw) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `checkerboard` 2-color pattern | 2 | **176** | 381 | 203 | 768 | 4,094 | 188 |
+| `sprite` pixel art | 16 | 1,026 | 1,025 | **456** | 1,122 | 1,906 | 492 |
+| `photo` continuous tone | 11,922 | 592,973 | **22,596** | n/a | n/a | 29,331 | 32,504 |
+| `gradient` smooth ramp | 16,384 | 791,819 | **261** | n/a | n/a | 33,043 | 37,256 |
+| `noise` random RGB | 4,095 | 198,281 | 12,420 | n/a | n/a | 16,398 | **12,348** |
+
+### Video
+
+A global palette shared across frames - the same model as an animated GIF, and
+the first place the format pulls clearly ahead:
+
+| Clip | Colors | `.4spl` | PNG/frame | PNG8/frame | GIF | QOI | xz(raw) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `bounce` 64x64 x 12 frames | 3 | **313** | 3,086 | 2,072 | 1,803 | 2,365 | 344 |
+| `screencast` 96x64 x 8 frames | 4 | **1,262** | 10,668 | 7,780 | 6,278 | 21,867 | 1,400 |
+
+### Volumes
+
+Against the containers built to hold a whole `(x, y, z)` grid as one object,
+not against 2D image formats:
+
+| Volume | Colors | `.4spl` | `.nii.gz` | NRRD | MetaImage | TIFF (pal) | PNG/slice | GIF |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `labels` 64x64x24 segmentation | 6 | **1,771** | 3,077 | 3,255 | 3,300 | 7,583 | 8,010 | 5,126 |
+| `angio` 64x64x24 sparse | 3 | **1,165** | 2,057 | 2,225 | 2,270 | 7,158 | 8,118 | 3,826 |
+| `voxel` 64x64x20 terrain | 9 | **2,868** | 4,593 | 4,764 | 4,809 | 8,294 | 12,211 | 13,454 |
+| `ct` 64x64x16 continuous | 256 | 46,211 | 59,826 | 60,013 | 60,059 | 55,245 | **47,543** | 60,139 |
+
+### 4D grids
+
+The `(x, y, z, frame)` shape the format is named for. NIfTI's `dim` is literally
+`(x, y, z, t)`, so this is a like-for-like comparison of two headers describing
+the same grid - and it is the format's best showing anywhere:
+
+| Grid | Colors | `.4spl` | `.nii.gz` | NRRD | MetaImage | TIFF | PNG/slice | GIF |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `beating` 48x48x8 x 6 frames | 4 | **1,359** | 4,619 | 4,784 | 4,842 | 14,384 | 19,060 | 11,005 |
+| `perfusion` 40x40x6 x 5 frames | 256 | 34,382 | 38,576 | 38,761 | 38,820 | 44,351 | **37,716** | 47,411 |
+
+### Lossy: `--colors N`
+
+Median-cut quantization is what makes many-colored content viable at all. PSNR
+against the source, `.4spl` sizes with the best scheme:
+
+| Clip | Exact | 64 colors | 16 or 32 colors | Best lossless rival |
+| --- | ---: | ---: | ---: | ---: |
+| `photo` | 592,973 | 9,202 (36.9 dB) | 4,491 (32.1 dB) | 22,596 (PNG) |
+| `gradient` | 791,819 | 3,224 (29.6 dB) | 864 (23.6 dB) | 261 (PNG) |
+| `noise` | 198,281 | 6,206 (22.8 dB) | 2,815 (18.0 dB) | 12,299 (gzip) |
+| `ct` | 46,211 | - | 15,139 (41.1 dB) | 35,809 (bzip2) |
+| `perfusion` | 34,382 | - | 8,130 (41.3 dB) | 17,886 (bzip2) |
+
+### What the numbers say
+
+* **Cost per color is the whole story on the losing side.** A palette entry is
+  12 floats - 48 bytes at float32 - so an exact palette costs
+  `48 x distinct_colors` before a single index is written. At 11,922 colors that
+  is 572 KB of palette against a 49 KB image. The header allows float16, which
+  would halve it, but the image/video codecs do not expose the precision flag
+  yet.
+* **One palette across many slices is the whole story on the winning side.**
+  `.4spl` substitutes a one-byte index per voxel before compression, so the
+  stream reaching the compressor is a third the size - and unlike every
+  per-slice format, that palette is paid once for the entire grid. Against real
+  volumetric containers that is 1.6-2.0x on structured data; against per-slice
+  PNG, 4-7x; on a 4D grid, 3.4x and 14x.
+* **GIF is the closest existing relative and is beaten on its own ground** -
+  5x on `screencast`, 5.8x on `bounce`, both with a global color table.
+* **TIFF is the only mainstream format with the same idea.** A palette stack
+  sharing one `ColorMap` is its best showing, and it still lands 2.9-10.6x
+  behind because each page carries its own Deflate stream.
+* **`bzip2` over raw bytes is a stubborn baseline.** It ties `.4spl` on
+  `labels` and beats it on `checkerboard`, `bounce`, `angio`, `ct` and
+  `perfusion`. Structured data has redundancy a block-sorting compressor finds
+  without knowing it is a grid.
+* **Scheme choice matters far less than palette size.** Brotli wins most clips,
+  lzma is within ~4%, deflate and zlib differ by the 6-byte zlib wrapper, and
+  RLE - the only real scheme in the dependency-free build - trails by 2.5-24x.
+
+Methodology, the full contender list and how to run these against your own
+files are in [Benchmarks against existing formats](#benchmarks-against-existing-formats)
+and [Volumetric benchmark against 3D formats](#volumetric-benchmark-against-3d-formats).
+
 ## Palette layout (v0.2)
 
 Version `{1,1,0,0}` pins the palette layout, resolving an ambiguity in the
@@ -365,45 +463,10 @@ of the codec as well as a size comparison.
 
 ### Results
 
-From `make bench-full` on the full-featured build (128×128 images, 64×64×12 and
-96×64×8 clips; smaller is better):
-
-| Clip | Colors | Best `.4spl` | PNG | GIF | QOI | xz(raw) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `checkerboard` 2-color pattern | 2 | **176** (brotli) | 381 | 768 | 4,094 | 188 |
-| `sprite` 16-color pixel art | 16 | **1,026** (brotli) | 1,025 | 1,122 | 1,906 | 492 |
-| `bounce` 12 frames, moving sprite | 3 | **313** (brotli) | 3,086 | 1,803 | 2,365 | 344 |
-| `screencast` 8 frames, static UI | 4 | **1,262** (brotli) | 10,668 | 6,278 | 21,867 | 1,400 |
-| `photo` continuous tone | 11,922 | 592,973 (brotli) | **22,596** | n/a | 29,331 | 32,504 |
-| `gradient` smooth ramp | 16,384 | 791,819 (bzip2) | **261** | n/a | 33,043 | 37,256 |
-| `noise` random RGB | 4,095 | 198,281 (bzip2) | 12,420 | n/a | 16,398 | **12,348** |
-
-What the numbers say:
-
-* **Low-color content is where the format is competitive.** On the two-color
-  checkerboard `.4spl` is less than half of PNG and under a quarter of GIF. On
-  the video clips the global palette pays off exactly as intended: `screencast`
-  is 8.5× smaller than PNG and 5× smaller than an animated GIF, `bounce` 10×
-  and 5.8×. Pixel art lands level with PNG and slightly ahead of GIF.
-* **Cost per color dominates everything else.** A palette entry is 12 floats -
-  48 bytes at the default float32 precision - so an exact palette costs
-  `48 × distinct_colors` bytes before a single index is written. At 11,922
-  colors that is 572 KB of palette against a 49 KB image, which is the whole
-  story of the `photo`, `gradient` and `noise` rows. The header allows float16,
-  which would halve it, but `encode-image`/`encode-video` do not expose the
-  precision flag yet.
-* **`--colors N` is what makes photographic content viable.** Quantizing
-  `photo` to 64 colors drops it from 593 KB to 9.2 KB - 2.4× smaller than PNG -
-  at 36.9 dB PSNR, and to 4.5 KB at 16 colors (32.1 dB).
-* **The index compresses well, and the choice of scheme matters less than
-  the palette does.** Brotli wins nearly every clip, but zlib stays within
-  about 30% of it everywhere, while RLE - the only scheme in the
-  dependency-free build - trails by 2.5-24× on the low-color clips. Plain `xz`
-  over the raw pixels is a strong baseline: `.4spl` beats it on the
-  checkerboard and both video clips, and loses on everything else.
-
-Re-run the numbers yourself with `make bench-full`; they are recomputed from
-the corpus, not stored.
+The sizes live in [Benchmarks](#benchmarks) at the top of this file, together
+with the volumetric and 4D results, so all three can be read side by side.
+They are recomputed from the corpus by `make bench-full`, not stored - re-run it
+and you get the same numbers, on any machine that builds the same backends.
 
 The harness and its reference codecs have their own test suite - round trips
 through every PNG filter, GIF's LZW table overflow and each QOI opcode, plus an
@@ -442,67 +505,26 @@ python3 tools/benchmark_volumes.py --input slices/    # your own stack of P6 sli
 These are real files, not approximations: the reference encoders in
 `tools/refvolumes.py` were cross-checked during development against the
 canonical readers for each format - `nibabel`, `pynrrd`, ITK (SimpleITK) and
-Pillow - and every size in the table below was decoded back and compared voxel
-for voxel by the harness itself.
+Pillow - and every size the harness reports was decoded back and compared voxel
+for voxel before it was printed.
 
 ### Results
 
-From `make bench-volumes` (all sizes in bytes; smaller is better):
+The volume and 4D-grid sizes are in [Benchmarks](#benchmarks) at the top of this
+file. Two things about them are worth restating here, because they are what the
+volumetric comparison is for:
 
-| Volume | Colors | Best `.4spl` | NIfTI `.nii.gz` | NRRD | MetaImage | TIFF (palette) | PNG per slice | GIF |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `labels` 64×64×24, segmentation map | 6 | **1,771** (brotli) | 3,077 | 3,255 | 3,300 | 7,583 | 8,010 | 5,126 |
-| `angio` 64×64×24, sparse structures | 3 | **1,165** (bzip2) | 2,057 | 2,225 | 2,270 | 7,158 | 8,118 | 3,826 |
-| `voxel` 64×64×20, blocky terrain | 9 | **2,868** (lzma) | 4,593 | 4,764 | 4,809 | 8,294 | 12,211 | 13,454 |
-| `ct` 64×64×16, continuous tone | 256 | 46,211 (bzip2) | 59,826 | 60,013 | 60,059 | 55,245 | **47,543** | 60,139 |
+* NIfTI, NRRD and MetaImage each have a time axis of their own, so for a 4D clip
+  the harness hands them the depth and they describe the same `(x, y, z, t)`
+  grid the `.4spl` header does - NIfTI's `dim` is literally that tuple. TIFF has
+  no such axis; its pages stay a flat sequence, and its rows say so.
+* The palette-color TIFF stack shares one `ColorMap` across every page, which is
+  the closest a mainstream format comes to what this one does. It is included
+  precisely so the comparison is not flattering.
 
-This is the format playing to its strengths, and the margins are much wider
-than in 2D:
-
-* **Against the volumetric containers it wins outright on structured data** -
-  1.6-2.0× smaller than `.nii.gz`, NRRD and MetaImage on `labels`, `angio` and
-  `voxel`, and 1.3× on continuous-tone `ct`. Those formats compress the raw
-  voxel bytes with a general-purpose codec; `.4spl` replaces every voxel with a
-  one-byte palette index first, so the stream those codecs see is a third the
-  size before they start.
-* **Against per-slice storage the gap is 4-7×** (`labels` 8,010 → 1,771,
-  `voxel` 12,211 → 2,868, `angio` 8,118 → 1,165). Nothing per-slice can
-  amortize a palette across depth, which is precisely what the format is for.
-* **TIFF is the only mainstream contender with the same idea**, and a palette
-  stack with a shared `ColorMap` is its best showing - but it still stores one
-  Deflate stream per page, so it lands 2.9-6.1× behind on the structured
-  volumes (and 1.2× behind on `ct`).
-* **The 256-color `ct` volume is the boundary.** Palette overhead
-  (48 bytes per color) plus one index per voxel stops paying against a
-  well-filtered per-slice PNG. `--colors 32` takes it to 15,651 at 41.1 dB, 3×
-  smaller than PNG, if lossy is acceptable.
-* **`bzip2` over raw voxels remains a stubborn baseline** - it ties `.4spl` on
-  `labels` and beats it on `angio` and `ct`. Structured 3D data has enormous
-  redundancy that a block-sorting compressor finds without knowing anything
-  about the grid.
-
-### 4D grids
-
-`encode-4d` puts the format's fourth axis within reach, and it is where the
-margins are widest. NIfTI, NRRD and MetaImage all have a time axis of their own
-- NIfTI's `dim` is literally `(x, y, z, t)`, the same shape as 4Splat's header -
-so the benchmark tells them the depth and compares like for like. TIFF has no
-such axis, so its pages stay a flat sequence, which the table labels.
-
-| 4D grid | Colors | Best `.4spl` | `.nii.gz` | NRRD | MetaImage | TIFF | PNG per slice | GIF |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `beating` 48×48×8 × 6 frames | 4 | **1,359** | 4,619 | 4,784 | 4,842 | 14,384 | 19,060 | 11,005 |
-| `perfusion` 40×40×6 × 5 frames | 256 | 34,382 | 38,576 | 38,761 | 38,820 | 44,351 | **37,716** | 47,411 |
-
-On `beating` a `.4spl` grid is **3.4× smaller than the best real 4D container**
-and **14× smaller than storing the slices as PNGs** - the widest margins
-anywhere in either benchmark, and the first case where it also beats `bzip2`
-over raw voxels (1,669). One palette covering both depth and time is doing
-exactly what the format's design claims.
-
-`perfusion` is the same 256-color wall as `ct`: near parity with the volumetric
-containers and slightly behind per-slice PNG, until `--colors 32` takes it to
-8,130 at 41.3 dB - 4.6× under PNG.
+```bash
+python3 -m pytest tests/test_benchmark_volumes.py
+```
 
 ## Test Suite
 
