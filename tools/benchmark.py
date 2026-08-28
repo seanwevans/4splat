@@ -90,6 +90,10 @@ class Clip:
     ``axis`` says what the extra frames mean - ``"time"`` for a video, or
     ``"depth"`` for a stack of z-slices, which the codec stores as a volume
     (``depth = N, frames = 1``) rather than as a sequence.
+
+    ``depth`` greater than 1 makes it a full 4D grid: ``frames`` then holds
+    ``depth * time`` slices in t-major, z-minor order - the order the index
+    itself uses - and the codec stores both axes.
     """
 
     name: str
@@ -98,6 +102,7 @@ class Clip:
     frames: List[bytes]
     description: str = ""
     axis: str = "time"
+    depth: int = 1
 
     @property
     def raw_bytes(self) -> int:
@@ -115,6 +120,8 @@ class Clip:
     def kind(self) -> str:
         if len(self.frames) == 1:
             return "image"
+        if self.depth > 1 and len(self.frames) > self.depth:
+            return "grid4d"
         return "volume" if self.axis == "depth" else "video"
 
     @property
@@ -122,6 +129,19 @@ class Clip:
         """What one entry of ``frames`` is called in reports."""
 
         return "slices" if self.axis == "depth" else "frames"
+
+    @property
+    def dimensions(self) -> str:
+        """The grid extent, written the way the header records it."""
+
+        if self.kind == "grid4d":
+            return (
+                f"{self.width}x{self.height}x{self.depth}"
+                f" x {len(self.frames) // self.depth} frames"
+            )
+        if len(self.frames) > 1:
+            return f"{self.width}x{self.height} x {len(self.frames)} {self.unit}"
+        return f"{self.width}x{self.height}"
 
 
 def _flat(width: int, height: int, shade: Callable[[int, int], Tuple[int, int, int]]) -> bytes:
@@ -397,12 +417,15 @@ class SplatRunner:
             "image": "encode-image",
             "video": "encode-video",
             "volume": "encode-volume",
+            "grid4d": "encode-4d",
         }
         args: List[str] = [commands[clip.kind]]
         if scheme != "none":
             args += ["--compress", scheme]
         if colors:
             args += ["--colors", str(colors)]
+        if clip.kind == "grid4d":
+            args += ["--depth", str(clip.depth)]
         if clip.kind == "image":
             args += [frame_paths[0], str(out)]
         else:
@@ -419,7 +442,11 @@ class SplatRunner:
             if self._run(["decode-image", str(path), str(out)]).returncode != 0:
                 return None
             return [read_ppm(out.read_bytes())[2]]
-        command = "decode-volume" if clip.kind == "volume" else "decode-video"
+        command = {
+            "volume": "decode-volume",
+            "grid4d": "decode-4d",
+            "video": "decode-video",
+        }[clip.kind]
         if self._run([command, str(path), str(prefix)]).returncode != 0:
             return None
         frames = []
@@ -624,13 +651,7 @@ def render_markdown(clips: Sequence[Clip], results: Sequence[Result], notes: str
         )
         lines.append(
             f"### `{clip.name}` - {clip.description}, "
-            f"{clip.width}x{clip.height}"
-            + (
-                f" x {len(clip.frames)} {clip.unit}"
-                if len(clip.frames) > 1
-                else ""
-            )
-            + f", {clip.colors} colors"
+            f"{clip.dimensions}, {clip.colors} colors"
         )
         lines.append("")
         lines.append("| Format | Variant | Bytes | bits/px | vs raw | vs PNG | Fidelity |")
@@ -787,10 +808,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.list:
         for name, builder in CORPUS_BUILDERS.items():
             clip = builder()
-            size = f"{clip.width}x{clip.height}"
-            if len(clip.frames) > 1:
-                size += f" x{len(clip.frames)}"
-            print(f"{name:<13} {size:<14} {clip.colors:>6} colors  {clip.description}")
+            print(
+                f"{name:<13} {clip.dimensions:<26} {clip.colors:>6} colors  "
+                f"{clip.description}"
+            )
         return 0
 
     if args.quick:

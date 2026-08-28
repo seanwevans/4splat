@@ -11,6 +11,7 @@ shared palette.
 import os
 import random
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -187,6 +188,82 @@ def test_tiff_decoder_rejects_big_endian():
 
 
 # --------------------------------------------------------------------------
+# 4D grids: the containers that have a time axis, and the ones that do not
+# --------------------------------------------------------------------------
+
+
+def make_grid(width, height, depth, frames, colors, seed=7):
+    """A 4D grid as depth*frames slices in t-major, z-minor order."""
+
+    return make_volume(width, height, depth * frames, colors, seed)
+
+
+@pytest.mark.parametrize("depth,frames", [(3, 4), (2, 2), (5, 1)])
+def test_nifti_4d_round_trip(depth, frames):
+    slices = make_grid(12, 10, depth, frames, 6)
+    data = rv.encode_nifti(12, 10, slices, depth)
+    dims = struct.unpack_from("<8h", data, 40)
+    assert dims[0] == (3 if frames == 1 else 4)
+    assert dims[1:5] == (12, 10, depth, frames)
+    assert rv.decode_nifti(data) == (12, 10, slices)
+    assert rv.decode_nifti_gz(rv.encode_nifti_gz(12, 10, slices, depth)) == (12, 10, slices)
+
+
+def test_nrrd_4d_declares_a_time_axis():
+    slices = make_grid(8, 6, 3, 4, 5)
+    data = rv.encode_nrrd(8, 6, slices, "gzip", 3)
+    header = data.split(b"\n\n")[0].decode()
+    assert "dimension: 5" in header
+    assert "sizes: 3 8 6 3 4" in header
+    assert header.rstrip().endswith("space dimension: 3")
+    assert "kinds: RGB-color space space space time" in header
+    assert rv.decode_nrrd(data) == (8, 6, slices)
+
+
+def test_metaimage_4d_uses_four_dimensions():
+    slices = make_grid(8, 6, 3, 4, 5)
+    data = rv.encode_metaimage(8, 6, slices, True, 3)
+    header = data.partition(b"ElementDataFile = LOCAL\n")[0].decode()
+    assert "NDims = 4" in header
+    assert "DimSize = 8 6 3 4" in header
+    assert "ElementSpacing = 1 1 1 1" in header
+    assert rv.decode_metaimage(data) == (8, 6, slices)
+
+
+def test_4d_encoders_reject_a_ragged_grid():
+    slices = make_grid(8, 6, 3, 4, 5)[:-1]  # 11 slices at depth 3
+    for call in (
+        lambda: rv.encode_nifti(8, 6, slices, 3),
+        lambda: rv.encode_nrrd(8, 6, slices, "gzip", 3),
+        lambda: rv.encode_metaimage(8, 6, slices, True, 3),
+    ):
+        with pytest.raises(ValueError):
+            call()
+
+
+def test_grid4d_clip_reports_both_axes():
+    slices = make_grid(16, 16, 4, 3, 5)
+    clip = benchmark.Clip("g", 16, 16, slices, "grid", axis="depth", depth=4)
+    assert clip.kind == "grid4d"
+    assert clip.dimensions == "16x16x4 x 3 frames"
+    assert clip.raw_bytes == 16 * 16 * 3 * 12
+
+
+def test_measure_reference_gives_4d_containers_the_depth():
+    clip = bv.CORPUS_BUILDERS["beating"]()
+    assert clip.kind == "grid4d"
+    results = bv.measure_volume_reference(clip, verify=True)
+    assert all(r.lossless for r in results)
+
+    # The containers with a time axis must be told about it...
+    nifti = next(r for r in results if r.detail == "RGB24, uncompressed")
+    assert nifti.size == clip.raw_bytes + 352
+    # ...and the one without says so in its label.
+    tiff = next(r for r in results if r.format == "TIFF stack" and "RGB" in r.detail)
+    assert "no time axis" in tiff.detail
+
+
+# --------------------------------------------------------------------------
 # corpus and harness
 # --------------------------------------------------------------------------
 
@@ -196,9 +273,11 @@ def test_volume_corpus_is_deterministic_and_depth_axis():
         first, second = builder(), builder()
         assert first.frames == second.frames, f"{name} is not reproducible"
         assert first.axis == "depth", f"{name} must be a volume, not a video"
-        assert first.kind == "volume"
+        assert first.kind in ("volume", "grid4d")
         assert first.unit == "slices"
         assert len(first.frames) > 1
+        if first.kind == "grid4d":
+            assert len(first.frames) % first.depth == 0
 
 
 def test_volume_corpus_spans_palette_sizes():
@@ -306,3 +385,58 @@ def test_end_to_end_volume_benchmark(tmp_path, capsys):
     rows = csv_path.read_text().splitlines()
     assert any(row.startswith("labels,NIfTI") for row in rows)
     assert any(row.startswith("labels,4splat") for row in rows)
+
+
+@needs_binary
+def test_splat_encodes_a_4d_grid_with_both_axes(tmp_path):
+    """A grid4d clip must reach encode-4d and land as depth D x frames N/D."""
+
+    clip = bv.CORPUS_BUILDERS["beating"]()
+    runner = benchmark.SplatRunner(SPLAT_BINARY, tmp_path)
+    out = tmp_path / "beating.4spl"
+    _ms, proc = runner.encode(clip, "rle", None, out)
+    assert proc.returncode == 0, proc.stdout.decode()
+
+    width, height, depth, frames = struct.unpack_from("<4I", out.read_bytes(), 8)
+    assert (width, height) == (clip.width, clip.height)
+    assert depth == clip.depth
+    assert frames == len(clip.frames) // clip.depth
+    assert frames > 1, "a 4D grid must keep more than one frame"
+    assert runner.decode(clip, out) == clip.frames
+
+
+@needs_binary
+def test_encode_4d_rejects_a_ragged_slice_count(tmp_path):
+    """13 slices at depth 3 is not a whole number of volumes."""
+
+    from refcodecs import write_ppm
+
+    paths = []
+    for i in range(13):
+        path = tmp_path / f"s{i:02d}.ppm"
+        path.write_bytes(write_ppm(4, 4, bytes((i, 40, 200)) * 16))
+        paths.append(str(path))
+
+    proc = subprocess.run(
+        [SPLAT_BINARY, "encode-4d", "--depth", "3", str(tmp_path / "out.4spl"), *paths],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    assert proc.returncode != 0
+    assert b"depth" in proc.stdout
+    assert not (tmp_path / "out.4spl").exists()
+
+
+@needs_binary
+def test_encode_4d_requires_depth(tmp_path):
+    from refcodecs import write_ppm
+
+    path = tmp_path / "s.ppm"
+    path.write_bytes(write_ppm(4, 4, bytes((1, 2, 3)) * 16))
+    proc = subprocess.run(
+        [SPLAT_BINARY, "encode-4d", str(tmp_path / "out.4spl"), str(path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    assert proc.returncode != 0
+    assert b"--depth" in proc.stdout

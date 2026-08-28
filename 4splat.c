@@ -3238,7 +3238,10 @@ static void print_usage(FILE *stream) {
           "  4splat encode-video [--compress <scheme>] [--colors <N>] <out.4spl> <frame.ppm>...\n"
           "  4splat decode-video <in.4spl> <out-prefix>   (writes <prefix>NNNN.ppm)\n"
           "  4splat encode-volume [--compress <scheme>] [--colors <N>] <out.4spl> <slice.ppm>...\n"
-          "  4splat decode-volume <in.4spl> <out-prefix>   (writes <prefix>NNNN.ppm)\n");
+          "  4splat decode-volume <in.4spl> <out-prefix>   (writes <prefix>NNNN.ppm)\n"
+          "  4splat encode-4d [--compress <scheme>] [--colors <N>] --depth <d> <out.4spl> "
+          "<slice.ppm>...   (slices in t-major, z-minor order)\n"
+          "  4splat decode-4d <in.4spl> <out-prefix>   (writes <prefix>NNNN.ppm)\n");
 }
 
 // Parse a color-space name (as used on the command line) into its flag value.
@@ -3893,11 +3896,15 @@ static bool write_ppm(const char *path, const uint8_t *rgb, uint32_t w, uint32_t
 }
 
 // Parse leading --compress <scheme> / --colors <N> options for the image and
-// video encoders. Sets *codec and *max_colors and returns the index of the
-// first positional argument, or -1 on error.
-static int parse_encode_options(int argc, char **argv, uint32_t *codec, uint32_t *max_colors) {
+// video encoders, plus --depth <d> when `depth` is non-NULL (encode-4d only).
+// Sets the outputs and returns the index of the first positional argument, or
+// -1 on error.
+static int parse_encode_options(int argc, char **argv, uint32_t *codec, uint32_t *max_colors,
+                                uint32_t *depth) {
   *codec = SPLAT_COMPRESSION_NONE;
   *max_colors = 0;
+  if (depth)
+    *depth = 0;
   int i = 0;
   while (i < argc && argv[i][0] == '-' && argv[i][1] == '-') {
     if (strcmp(argv[i], "--compress") == 0 && i + 1 < argc) {
@@ -3917,6 +3924,12 @@ static int parse_encode_options(int argc, char **argv, uint32_t *codec, uint32_t
         return -1;
       }
       i += 2;
+    } else if (depth && strcmp(argv[i], "--depth") == 0 && i + 1 < argc) {
+      if (!parse_u32(argv[i + 1], depth) || *depth == 0) {
+        LOG_ERROR("❌ Invalid --depth value '%s' (positive integer)\n", argv[i + 1]);
+        return -1;
+      }
+      i += 2;
     } else {
       LOG_ERROR("❌ Unknown or incomplete option '%s'\n", argv[i]);
       return -1;
@@ -3927,7 +3940,7 @@ static int parse_encode_options(int argc, char **argv, uint32_t *codec, uint32_t
 
 static int command_encode_image(int argc, char **argv) {
   uint32_t codec = 0, max_colors = 0;
-  int p = parse_encode_options(argc, argv, &codec, &max_colors);
+  int p = parse_encode_options(argc, argv, &codec, &max_colors, NULL);
   if (p < 0)
     return EXIT_FAILURE;
   if (argc - p != 2) {
@@ -4002,51 +4015,95 @@ static int command_decode_image(int argc, char **argv) {
   return EXIT_SUCCESS;
 }
 
-static int command_encode_video(int argc, char **argv) {
-  uint32_t codec = 0, max_colors = 0;
-  int a = parse_encode_options(argc, argv, &codec, &max_colors);
+// The three stack encoders differ only in how the slice list maps onto the
+// format's z and t axes, so they share one implementation over the general
+// (x, y, z, t) codec: a video is depth 1, a volume is frames 1, and encode-4d
+// takes both from --depth and the slice count.
+typedef enum {
+  SPLAT_STACK_VIDEO,
+  SPLAT_STACK_VOLUME,
+  SPLAT_STACK_GRID4D,
+} SplatStackKind;
+
+static int encode_stack_command(int argc, char **argv, SplatStackKind kind) {
+  static const char *const USAGE[] = {
+      "❌ Usage: 4splat encode-video [--compress <scheme>] [--colors <N>] "
+      "<out.4spl> <frame.ppm>...\n",
+      "❌ Usage: 4splat encode-volume [--compress <scheme>] [--colors <N>] "
+      "<out.4spl> <slice.ppm>...\n",
+      "❌ Usage: 4splat encode-4d [--compress <scheme>] [--colors <N>] --depth <d> "
+      "<out.4spl> <slice.ppm>...\n",
+  };
+  const char *unit = kind == SPLAT_STACK_VIDEO ? "Frame" : "Slice";
+
+  uint32_t codec = 0, max_colors = 0, depth_opt = 0;
+  int a = parse_encode_options(argc, argv, &codec, &max_colors,
+                               kind == SPLAT_STACK_GRID4D ? &depth_opt : NULL);
   if (a < 0)
     return EXIT_FAILURE;
   if (argc - a < 2) {
-    LOG_ERROR("❌ Usage: 4splat encode-video [--compress <scheme>] [--colors <N>] "
-              "<out.4spl> <frame.ppm>...\n");
+    LOG_ERROR("%s", USAGE[kind]);
     return EXIT_FAILURE;
   }
   const char *out_path = argv[a++];
-  uint32_t nframes = (uint32_t)(argc - a);
+  uint32_t nslices = (uint32_t)(argc - a);
 
-  uint8_t **frames = calloc(nframes, sizeof(uint8_t *));
-  if (!frames)
+  uint32_t depth = 1, frames = 1;
+  switch (kind) {
+  case SPLAT_STACK_VIDEO:
+    frames = nslices;
+    break;
+  case SPLAT_STACK_VOLUME:
+    depth = nslices;
+    break;
+  case SPLAT_STACK_GRID4D:
+    if (depth_opt == 0) {
+      LOG_ERROR("❌ encode-4d requires --depth <d>\n");
+      return EXIT_FAILURE;
+    }
+    if (nslices % depth_opt != 0) {
+      LOG_ERROR("❌ %u slice(s) is not a whole number of volumes at depth %u\n", nslices,
+                depth_opt);
+      return EXIT_FAILURE;
+    }
+    depth = depth_opt;
+    frames = nslices / depth_opt;
+    break;
+  }
+
+  uint8_t **slices = calloc(nslices, sizeof(uint8_t *));
+  if (!slices)
     return EXIT_FAILURE;
 
   uint32_t w = 0, h = 0;
   bool ok = true;
-  for (uint32_t t = 0; t < nframes; ++t) {
+  for (uint32_t s = 0; s < nslices; ++s) {
     uint32_t fw = 0, fh = 0;
-    frames[t] = read_ppm(argv[a + t], &fw, &fh);
-    if (!frames[t]) {
+    slices[s] = read_ppm(argv[a + s], &fw, &fh);
+    if (!slices[s]) {
       ok = false;
       break;
     }
-    if (t == 0) {
+    if (s == 0) {
       w = fw;
       h = fh;
     } else if (fw != w || fh != h) {
-      LOG_ERROR("❌ Frame '%s' is %ux%u; expected %ux%u\n", argv[a + t], fw, fh, w, h);
+      LOG_ERROR("❌ %s '%s' is %ux%u; expected %ux%u\n", unit, argv[a + s], fw, fh, w, h);
       ok = false;
       break;
     }
   }
 
+  // Slices arrive in t-major, z-minor order, the same order the index uses.
   Splat4DVideo video;
-  bool built = ok && frames_to_video_quantized((const uint8_t *const *)frames, nframes, w, h,
-                                               max_colors, &video);
-  for (uint32_t t = 0; t < nframes; ++t)
-    free(frames[t]);
-  free(frames);
+  bool built = ok && stack_to_video_quantized((const uint8_t *const *)slices, depth, frames, w, h,
+                                              max_colors, &video);
+  for (uint32_t s = 0; s < nslices; ++s)
+    free(slices[s]);
+  free(slices);
   if (!built) {
     if (ok)
-      LOG_ERROR("❌ Failed to build 4Splat video from frames\n");
+      LOG_ERROR("❌ Failed to build 4Splat grid from slices\n");
     return EXIT_FAILURE;
   }
   if (codec != SPLAT_COMPRESSION_NONE)
@@ -4061,10 +4118,18 @@ static int command_encode_video(int argc, char **argv) {
   }
   bool wrote = write_splat4DVideo(fp, &video);
   fclose(fp);
-  printf("✅ Encoded %u frame(s) %ux%u (%u colors) to '%s'\n", nframes, w, h, video.header.pSize,
-         out_path);
+  if (kind == SPLAT_STACK_GRID4D)
+    printf("✅ Encoded %u slice(s) %ux%u depth %u x %u frame(s) (%u colors) to '%s'\n", nslices, w,
+           h, depth, frames, video.header.pSize, out_path);
+  else
+    printf("✅ Encoded %u %s(s) %ux%u (%u colors) to '%s'\n", nslices,
+           kind == SPLAT_STACK_VIDEO ? "frame" : "slice", w, h, video.header.pSize, out_path);
   free_splat4DVideo(&video);
   return wrote ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+static int command_encode_video(int argc, char **argv) {
+  return encode_stack_command(argc, argv, SPLAT_STACK_VIDEO);
 }
 
 static int command_decode_video(int argc, char **argv) {
@@ -4112,73 +4177,19 @@ static int command_decode_video(int argc, char **argv) {
 }
 
 static int command_encode_volume(int argc, char **argv) {
-  uint32_t codec = 0, max_colors = 0;
-  int a = parse_encode_options(argc, argv, &codec, &max_colors);
-  if (a < 0)
-    return EXIT_FAILURE;
-  if (argc - a < 2) {
-    LOG_ERROR("❌ Usage: 4splat encode-volume [--compress <scheme>] [--colors <N>] "
-              "<out.4spl> <slice.ppm>...\n");
-    return EXIT_FAILURE;
-  }
-  const char *out_path = argv[a++];
-  uint32_t depth = (uint32_t)(argc - a);
-
-  uint8_t **slices = calloc(depth, sizeof(uint8_t *));
-  if (!slices)
-    return EXIT_FAILURE;
-
-  uint32_t w = 0, h = 0;
-  bool ok = true;
-  for (uint32_t z = 0; z < depth; ++z) {
-    uint32_t fw = 0, fh = 0;
-    slices[z] = read_ppm(argv[a + z], &fw, &fh);
-    if (!slices[z]) {
-      ok = false;
-      break;
-    }
-    if (z == 0) {
-      w = fw;
-      h = fh;
-    } else if (fw != w || fh != h) {
-      LOG_ERROR("❌ Slice '%s' is %ux%u; expected %ux%u\n", argv[a + z], fw, fh, w, h);
-      ok = false;
-      break;
-    }
-  }
-
-  Splat4DVideo video;
-  bool built = ok && stack_to_video_quantized((const uint8_t *const *)slices, depth, 1, w, h,
-                                              max_colors, &video);
-  for (uint32_t z = 0; z < depth; ++z)
-    free(slices[z]);
-  free(slices);
-  if (!built) {
-    if (ok)
-      LOG_ERROR("❌ Failed to build 4Splat volume from slices\n");
-    return EXIT_FAILURE;
-  }
-  if (codec != SPLAT_COMPRESSION_NONE)
-    set_flag_field(&video.header.flags, SPLAT_FLAG_COMPRESSION_MASK, SPLAT_FLAG_COMPRESSION_SHIFT,
-                   codec);
-
-  FILE *fp = fopen(out_path, "wb");
-  if (!fp) {
-    LOG_ERROR("❌ Unable to create '%s': %s\n", out_path, strerror(errno));
-    free_splat4DVideo(&video);
-    return EXIT_FAILURE;
-  }
-  bool wrote = write_splat4DVideo(fp, &video);
-  fclose(fp);
-  printf("✅ Encoded %u slice(s) %ux%u (%u colors) to '%s'\n", depth, w, h, video.header.pSize,
-         out_path);
-  free_splat4DVideo(&video);
-  return wrote ? EXIT_SUCCESS : EXIT_FAILURE;
+  return encode_stack_command(argc, argv, SPLAT_STACK_VOLUME);
 }
 
-static int command_decode_volume(int argc, char **argv) {
+static int command_encode_4d(int argc, char **argv) {
+  return encode_stack_command(argc, argv, SPLAT_STACK_GRID4D);
+}
+
+// decode-volume and decode-4d differ only in what they report: video_to_slices
+// already reconstructs depth*frames slices in t-major, z-minor order.
+static int decode_stack_command(int argc, char **argv, bool grid4d) {
   if (argc != 2) {
-    LOG_ERROR("❌ Usage: 4splat decode-volume <in.4spl> <out-prefix>\n");
+    LOG_ERROR("❌ Usage: 4splat %s <in.4spl> <out-prefix>\n",
+              grid4d ? "decode-4d" : "decode-volume");
     return EXIT_FAILURE;
   }
   FILE *fp = fopen(argv[0], "rb");
@@ -4194,6 +4205,7 @@ static int command_decode_volume(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
+  uint32_t depth = video.header.depth, frames = video.header.frames;
   uint8_t **slices = NULL;
   uint32_t nslices = 0, w = 0, h = 0;
   bool ok = video_to_slices(&video, &slices, &nslices, &w, &h);
@@ -4215,9 +4227,21 @@ static int command_decode_volume(int argc, char **argv) {
   if (!wrote)
     return EXIT_FAILURE;
 
-  printf("✅ Decoded '%s' to %u slice(s) %ux%u ('%s0000.ppm'...)\n", argv[0], nslices, w, h,
-         argv[1]);
+  if (grid4d)
+    printf("✅ Decoded '%s' to %u slice(s) %ux%u depth %u x %u frame(s) ('%s0000.ppm'...)\n",
+           argv[0], nslices, w, h, depth, frames, argv[1]);
+  else
+    printf("✅ Decoded '%s' to %u slice(s) %ux%u ('%s0000.ppm'...)\n", argv[0], nslices, w, h,
+           argv[1]);
   return EXIT_SUCCESS;
+}
+
+static int command_decode_volume(int argc, char **argv) {
+  return decode_stack_command(argc, argv, false);
+}
+
+static int command_decode_4d(int argc, char **argv) {
+  return decode_stack_command(argc, argv, true);
 }
 
 int main(int argc, char **argv) {
@@ -4250,6 +4274,12 @@ int main(int argc, char **argv) {
   }
   if (strcmp(command, "decode-volume") == 0) {
     return command_decode_volume(argc - 2, argv + 2);
+  }
+  if (strcmp(command, "encode-4d") == 0) {
+    return command_encode_4d(argc - 2, argv + 2);
+  }
+  if (strcmp(command, "decode-4d") == 0) {
+    return command_decode_4d(argc - 2, argv + 2);
   }
 
   print_usage(stderr);
