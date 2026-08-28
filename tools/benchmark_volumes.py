@@ -9,9 +9,14 @@ z)` grid as one object - NIfTI, NRRD, MetaImage and multi-page TIFF - plus the
 
 This is the comparison the format is actually built for. A `.4spl` volume
 carries one palette for the entire grid, with each entry's `mu_z`/`sigma_z`
-describing where in depth that color lives; the per-slice formats have no way
-to share anything between slices, and of the volumetric containers only TIFF
-has a palette at all.
+describing where in depth that color lives - and a 4D grid carries `mu_t` too;
+the per-slice formats have no way to share anything between slices, and of the
+volumetric containers only TIFF has a palette at all.
+
+The corpus holds both: four 3D volumes and two 4D grids, the latter encoded
+with `encode-4d --depth D`. NIfTI, NRRD and MetaImage each have a time axis, so
+they are given the depth and describe the same `(x, y, z, t)` grid the header
+does; TIFF has none, and its rows say so.
 
     python3 tools/benchmark_volumes.py                    # full corpus
     python3 tools/benchmark_volumes.py --quick
@@ -250,14 +255,100 @@ def _corpus_voxel() -> Clip:
     )
 
 
+def _corpus_beating() -> Clip:
+    """A 4D grid: a labeled structure that pulses over time.
+
+    Slices are laid out t-major, z-minor, the order the index uses, so the
+    codec sees one palette spanning both depth and time.
+    """
+
+    width = height = 48
+    depth, frames = 8, 6
+    wall = (206, 84, 84)
+    lumen = (240, 214, 160)
+    tissue = (64, 72, 96)
+    background = (10, 12, 18)
+
+    slices = []
+    for t in range(frames):
+        phase = 1.0 + 0.35 * math.sin(2 * math.pi * t / frames)
+        for z in range(depth):
+            zr = 1.0 - abs(z - (depth - 1) / 2.0) / depth
+            outer = 15.0 * phase * (0.5 + zr)
+            inner = outer * 0.55
+            out = bytearray()
+            for y in range(height):
+                for x in range(width):
+                    d = math.hypot(x - width / 2.0, y - height / 2.0)
+                    if d <= inner:
+                        color = lumen
+                    elif d <= outer:
+                        color = wall
+                    elif d <= outer + 6:
+                        color = tissue
+                    else:
+                        color = background
+                    out += bytes(color)
+            slices.append(bytes(out))
+    return Clip(
+        "beating",
+        width,
+        height,
+        slices,
+        "4-color structure pulsing over time",
+        axis="depth",
+        depth=depth,
+    )
+
+
+def _corpus_perfusion() -> Clip:
+    """A 4D grid with continuous tone: intensity washing through a volume."""
+
+    width = height = 40
+    depth, frames = 6, 5
+    rng = random.Random(0xBEEF)
+    seeds = [
+        (rng.uniform(8, 32), rng.uniform(8, 32), rng.uniform(0, depth), rng.uniform(6, 14))
+        for _ in range(5)
+    ]
+
+    slices = []
+    for t in range(frames):
+        wave = t / max(1, frames - 1)
+        for z in range(depth):
+            out = bytearray()
+            for y in range(height):
+                for x in range(width):
+                    value = 0.0
+                    for index, (cx, cy, cz, radius) in enumerate(seeds):
+                        arrival = index / len(seeds)
+                        strength = max(0.0, 1.0 - abs(wave - arrival) * 2.2)
+                        d2 = (x - cx) ** 2 + (y - cy) ** 2 + ((z - cz) * 2.0) ** 2
+                        value += 235.0 * strength * math.exp(-d2 / (2 * radius * radius))
+                    v = max(0, min(255, int(value)))
+                    out += bytes((v, v // 2 + 20, 255 - v))
+            slices.append(bytes(out))
+    return Clip(
+        "perfusion",
+        width,
+        height,
+        slices,
+        "continuous tone washing through time",
+        axis="depth",
+        depth=depth,
+    )
+
+
 CORPUS_BUILDERS: Dict[str, Callable[[], Clip]] = {
     "labels": _corpus_labels,
     "angio": _corpus_angio,
     "ct": _corpus_ct,
     "voxel": _corpus_voxel,
+    "beating": _corpus_beating,
+    "perfusion": _corpus_perfusion,
 }
 
-QUICK_CORPUS = ("labels", "ct")
+QUICK_CORPUS = ("labels", "ct", "beating")
 
 
 def load_inputs(paths: Sequence[str]) -> List[Clip]:
@@ -293,6 +384,10 @@ def measure_volume_reference(clip: Clip, verify: bool) -> List[Result]:
 
     raw = b"".join(clip.frames)
     width, height, slices = clip.width, clip.height, clip.frames
+    # NIfTI, NRRD and MetaImage each have a time axis; for a 4D clip they are
+    # told the depth so the header describes (x, y, z, t) rather than one tall
+    # stack. TIFF has no such axis, so its pages stay a flat sequence.
+    depth = clip.depth if clip.kind == "grid4d" else None
     results: List[Result] = []
 
     def add(fmt: str, detail: str, data: bytes, ms: float, ok: Optional[bool]) -> None:
@@ -323,22 +418,23 @@ def measure_volume_reference(clip: Clip, verify: bool) -> List[Result]:
     # Volumetric containers: one file describing the whole (x, y, z) grid.
     whole_volume(
         "NIfTI", "RGB24, uncompressed",
-        lambda: encode_nifti(width, height, slices), decode_nifti,
+        lambda: encode_nifti(width, height, slices, depth), decode_nifti,
     )
     whole_volume(
         "NIfTI", "RGB24, .nii.gz",
-        lambda: encode_nifti_gz(width, height, slices), decode_nifti_gz,
+        lambda: encode_nifti_gz(width, height, slices, depth), decode_nifti_gz,
     )
     whole_volume(
         "NRRD", "gzip encoding",
-        lambda: encode_nrrd(width, height, slices, "gzip"), decode_nrrd,
+        lambda: encode_nrrd(width, height, slices, "gzip", depth), decode_nrrd,
     )
     whole_volume(
         "MetaImage", ".mha, zlib",
-        lambda: encode_metaimage(width, height, slices, True), decode_metaimage,
+        lambda: encode_metaimage(width, height, slices, True, depth), decode_metaimage,
     )
+    pages = "RGB, Deflate" + (", no time axis" if depth else "")
     whole_volume(
-        "TIFF stack", "RGB, Deflate",
+        "TIFF stack", pages,
         lambda: encode_tiff_stack(width, height, slices, True), decode_tiff_stack,
     )
     if clip.colors <= 256:
@@ -432,8 +528,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.list:
         for name, builder in CORPUS_BUILDERS.items():
             clip = builder()
-            size = f"{clip.width}x{clip.height}x{len(clip.frames)}"
-            print(f"{name:<8} {size:<14} {clip.colors:>6} colors  {clip.description}")
+            print(
+                f"{name:<10} {clip.dimensions:<26} {clip.colors:>6} colors  "
+                f"{clip.description}"
+            )
         return 0
 
     if args.quick:
@@ -497,8 +595,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         notes_lines.append(
             "`.4spl` volumes are written by `encode-volume` (depth = N, "
-            "frames = 1): one palette for the whole grid, with each entry's "
-            "`mu_z`/`sigma_z` recording where in depth that color sits."
+            "frames = 1) and 4D grids by `encode-4d --depth D` (depth = D, "
+            "frames = N/D): one palette for the whole grid, with each entry's "
+            "`mu_z`/`sigma_z` and `mu_t`/`sigma_t` recording where in depth and "
+            "time that color sits."
         )
         notes = "\n".join(f"- {line}" for line in notes_lines)
 

@@ -282,12 +282,23 @@ pseudo-GIF — and shares the same code path.
 # volume (a stack of z-slices; depth > 1, frames = 1)
 4splat encode-volume [--compress <scheme>] [--colors <N>] vol.4spl slice0.ppm slice1.ppm ...
 4splat decode-volume vol.4spl restored_       # writes restored_0000.ppm, ...
+
+# 4D grid (a volume that changes over time; depth > 1, frames > 1)
+4splat encode-4d [--compress <scheme>] [--colors <N>] --depth 8 grid.4spl slice0.ppm ...
+4splat decode-4d grid.4spl restored_          # writes restored_0000.ppm, ...
 ```
 
-All four codecs share one implementation over the format's `(x, y, z, t)` grid:
-an image is `depth = frames = 1`, a video is `depth = 1, frames = N`, and a
-volume is `depth = N, frames = 1`. A volume's splats carry real `mu_z`/`sigma_z`
-from the slices each color occupies, just as a video's carry `mu_t`/`sigma_t`.
+`encode-4d` takes `depth * frames` slices in **t-major, z-minor** order - slice
+`s` is `t = s / depth`, `z = s % depth`, the same order the index itself uses -
+and refuses a count that is not a whole number of volumes. This is the full
+`(x, y, z, frame)` grid the format is named for: one palette spanning depth
+*and* time, with each entry carrying `mu_z`/`sigma_z` and `mu_t`/`sigma_t`.
+
+All of these share one implementation over the format's `(x, y, z, t)` grid: an
+image is `depth = frames = 1`, a video is `depth = 1, frames = N`, a volume is
+`depth = N, frames = 1`, and `encode-4d` is the general case with both axes set.
+A volume's splats carry real `mu_z`/`sigma_z` from the slices each color
+occupies, just as a video's carry `mu_t`/`sigma_t`; a 4D grid carries both.
 
 Input/output is binary PPM (`P6`, maxval 255); all frames must share dimensions.
 `--compress` (e.g. `zstd`, `rle`) compresses the index — a 2-color checkerboard
@@ -406,8 +417,8 @@ python3 -m pytest tests/test_benchmark.py
 
 The comparison above pits `.4spl` against 2D image formats. `tools/benchmark_volumes.py`
 is the separate, volumetric one: a stack of z-slices encoded with
-`encode-volume` against the containers built to hold a whole `(x, y, z)` grid
-as a single object.
+`encode-volume` - or a time-varying grid encoded with `encode-4d` - against the
+containers built to hold a whole `(x, y, z[, t])` grid as a single object.
 
 ```bash
 make bench-volumes                                    # every volume, every scheme
@@ -426,7 +437,7 @@ python3 tools/benchmark_volumes.py --input slices/    # your own stack of P6 sli
 | `PNG` / `PNG8` / `QOI` | one file per slice - what you get without a volumetric container |
 | `GIF` | the slices as animation frames, sharing a global color table |
 | `gzip` / `bzip2` / `xz` | general-purpose compressors over the raw voxel grid |
-| `4splat` | `encode-volume`, one row per scheme, plus lossy `--colors N` runs |
+| `4splat` | `encode-volume` or `encode-4d`, one row per scheme, plus lossy `--colors N` runs |
 
 These are real files, not approximations: the reference encoders in
 `tools/refvolumes.py` were cross-checked during development against the
@@ -470,15 +481,28 @@ than in 2D:
   redundancy that a block-sorting compressor finds without knowing anything
   about the grid.
 
-### Reachable today: 3D, not 4D
+### 4D grids
 
-`encode-volume` covers `depth = N, frames = 1`. The codec core already handles
-the full 4D case - `stack_to_video_quantized()` takes `depth × frames` slices
-in t-major, z-minor order, and the header has always carried both fields - but
-no CLI command feeds it both axes, so a time-varying volume can only be built
-through the low-level `encode` with a hand-made palette and index. That is the
-one gap between the format's stated `(x, y, z, frame)` model and what can be
-benchmarked here.
+`encode-4d` puts the format's fourth axis within reach, and it is where the
+margins are widest. NIfTI, NRRD and MetaImage all have a time axis of their own
+- NIfTI's `dim` is literally `(x, y, z, t)`, the same shape as 4Splat's header -
+so the benchmark tells them the depth and compares like for like. TIFF has no
+such axis, so its pages stay a flat sequence, which the table labels.
+
+| 4D grid | Colors | Best `.4spl` | `.nii.gz` | NRRD | MetaImage | TIFF | PNG per slice | GIF |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `beating` 48×48×8 × 6 frames | 4 | **1,359** | 4,619 | 4,784 | 4,842 | 14,384 | 19,060 | 11,005 |
+| `perfusion` 40×40×6 × 5 frames | 256 | 34,382 | 38,576 | 38,761 | 38,820 | 44,351 | **37,716** | 47,411 |
+
+On `beating` a `.4spl` grid is **3.4× smaller than the best real 4D container**
+and **14× smaller than storing the slices as PNGs** - the widest margins
+anywhere in either benchmark, and the first case where it also beats `bzip2`
+over raw voxels (1,669). One palette covering both depth and time is doing
+exactly what the format's design claims.
+
+`perfusion` is the same 256-color wall as `ct`: near parity with the volumetric
+containers and slightly behind per-slice PNG, until `--colors 32` takes it to
+8,130 at 41.3 dB - 4.6× under PNG.
 
 ## Test Suite
 
@@ -522,6 +546,8 @@ benchmarked here.
 | `read_video_rejects_big_endian_flag` | Confirms video reading rejects files flagged as big-endian. |
 | `read_video_fails_on_invalid_footer_marker` | Ensures video reading fails when the footer terminator is corrupted. |
 | `idxoffset_sanity_mismatch` | Checks the idxoffset sanity helpers catch mismatched offsets between header and footer. |
+| `grid4d_round_trip` | Builds a depth 2 x 3 frame grid and checks every slice comes back in t-major, z-minor order. |
+| `grid4d_separates_depth_from_time` | Confirms a 4D grid's palette entries record the z and t of the slice each color came from. |
 | `header_defaults_to_float32_precision` | Verifies header construction defaults the precision flag to float32 when unspecified. |
 
 ## Fuzzing

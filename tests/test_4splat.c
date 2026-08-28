@@ -1541,6 +1541,55 @@ static bool test_volume_populates_mu_z(void) {
   return ok;
 }
 
+static bool test_grid4d_round_trip(void) {
+  // depth 2 x 3 frames = 6 slices of 1x1, in t-major z-minor order
+  // (slice s is t = s / depth, z = s % depth).
+  uint8_t px[6][3] = {{255, 0, 0},   {0, 255, 0},   {0, 0, 255},
+                      {255, 255, 0}, {255, 0, 255}, {0, 255, 255}};
+  const uint8_t *slices[6] = {px[0], px[1], px[2], px[3], px[4], px[5]};
+  Splat4DVideo v;
+  if (!stack_to_video_quantized(slices, 2, 3, 1, 1, 0, &v))
+    return false;
+
+  bool ok = v.header.depth == 2 && v.header.frames == 3 && v.header.width == 1 &&
+            v.header.height == 1 && v.header.pSize == 6;
+  uint8_t **rec = NULL;
+  uint32_t ns = 0, w = 0, h = 0;
+  if (ok)
+    ok = video_to_slices(&v, &rec, &ns, &w, &h);
+  if (ok)
+    ok = ns == 6;
+  for (uint32_t s = 0; ok && s < ns; ++s)
+    ok = memcmp(rec[s], px[s], 3) == 0;
+  if (rec) {
+    for (uint32_t s = 0; s < ns; ++s)
+      free(rec[s]);
+    free(rec);
+  }
+  free_splat4DVideo(&v);
+  return ok;
+}
+
+static bool test_grid4d_separates_depth_from_time(void) {
+  // Same six colors: each appears in exactly one (z, t) cell, so every palette
+  // entry must record the z and t of the slice it came from.
+  uint8_t px[6][3] = {{255, 0, 0},   {0, 255, 0},   {0, 0, 255},
+                      {255, 255, 0}, {255, 0, 255}, {0, 255, 255}};
+  const uint8_t *slices[6] = {px[0], px[1], px[2], px[3], px[4], px[5]};
+  Splat4DVideo v;
+  if (!stack_to_video_quantized(slices, 2, 3, 1, 1, 0, &v))
+    return false;
+
+  bool ok = v.header.pSize == 6;
+  for (uint32_t s = 0; ok && s < 6; ++s) {
+    // Palette entries are created in first-appearance order, so entry s is the
+    // color of slice s: z = s % depth, t = s / depth.
+    ok = v.palette.palette[s].mu_z == (float)(s % 2) && v.palette.palette[s].mu_t == (float)(s / 2);
+  }
+  free_splat4DVideo(&v);
+  return ok;
+}
+
 static test_case TESTS[] = {
     {"header_total_indices_checked", test_header_total_indices_checked},
     {"create_splat4D", test_create_splat4D},
@@ -1609,6 +1658,8 @@ static test_case TESTS[] = {
     {"quantize_reduces_palette", test_quantize_reduces_palette},
     {"quantize_passthrough_within_budget", test_quantize_passthrough_within_budget},
     {"volume_round_trip", test_volume_round_trip},
+    {"grid4d_round_trip", test_grid4d_round_trip},
+    {"grid4d_separates_depth_from_time", test_grid4d_separates_depth_from_time},
     {"volume_populates_mu_z", test_volume_populates_mu_z},
     {"golden_conformance_vector", test_golden_conformance_vector},
     {"golden_vector_reads_back", test_golden_vector_reads_back},

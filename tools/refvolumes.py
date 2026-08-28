@@ -28,7 +28,7 @@ from __future__ import annotations
 import gzip
 import struct
 import zlib
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from refcodecs import build_palette
 
@@ -65,14 +65,28 @@ def _unslice(data: bytes, width: int, height: int, depth: int) -> List[bytes]:
 # --------------------------------------------------------------------------
 
 
-def encode_nifti(width: int, height: int, slices: Sequence[bytes]) -> bytes:
-    """Write a single-file NIfTI-1 volume (`n+1`, RGB24, one 348-byte header)."""
+def encode_nifti(
+    width: int, height: int, slices: Sequence[bytes], depth: Optional[int] = None
+) -> bytes:
+    """Write a single-file NIfTI-1 volume (`n+1`, RGB24, one 348-byte header).
 
-    depth = len(slices)
+    With ``depth`` given, ``slices`` is a 4D grid in t-major, z-minor order and
+    the header describes it as such - `dim[3] = z`, `dim[4] = t`.  This is the
+    one existing format whose header says exactly what 4Splat's does.
+    """
+
+    if depth is None:
+        depth = len(slices)
+    if len(slices) % depth:
+        raise ValueError("slice count is not a whole number of volumes")
+    frames = len(slices) // depth
+
     header = bytearray(348)
     struct.pack_into("<i", header, 0, 348)  # sizeof_hdr
     # dim[0] = number of used dimensions, then x, y, z, t, ...
-    struct.pack_into("<8h", header, 40, 3, width, height, depth, 1, 1, 1, 1)
+    struct.pack_into(
+        "<8h", header, 40, 3 if frames == 1 else 4, width, height, depth, frames, 1, 1, 1
+    )
     struct.pack_into("<h", header, 70, _DT_RGB24)  # datatype
     struct.pack_into("<h", header, 72, 24)  # bitpix
     # pixdim[0..7]: qfac then the voxel size on each axis.
@@ -95,13 +109,18 @@ def decode_nifti(data: bytes) -> Tuple[int, int, List[bytes]]:
         raise ValueError(f"unsupported NIfTI datatype {datatype}")
     (vox_offset,) = struct.unpack_from("<f", data, 108)
     width, height, depth = dims[1], dims[2], dims[3]
-    return width, height, _unslice(data[int(vox_offset) :], width, height, depth)
+    frames = dims[4] if dims[0] >= 4 else 1
+    return width, height, _unslice(
+        data[int(vox_offset) :], width, height, depth * max(1, frames)
+    )
 
 
-def encode_nifti_gz(width: int, height: int, slices: Sequence[bytes]) -> bytes:
+def encode_nifti_gz(
+    width: int, height: int, slices: Sequence[bytes], depth: Optional[int] = None
+) -> bytes:
     """The `.nii.gz` form nearly every NIfTI in the wild is actually stored as."""
 
-    return gzip.compress(encode_nifti(width, height, slices), 9, mtime=0)
+    return gzip.compress(encode_nifti(width, height, slices, depth), 9, mtime=0)
 
 
 def decode_nifti_gz(data: bytes) -> Tuple[int, int, List[bytes]]:
@@ -114,23 +133,44 @@ def decode_nifti_gz(data: bytes) -> Tuple[int, int, List[bytes]]:
 
 
 def encode_nrrd(
-    width: int, height: int, slices: Sequence[bytes], encoding: str = "gzip"
+    width: int,
+    height: int,
+    slices: Sequence[bytes],
+    encoding: str = "gzip",
+    depth: Optional[int] = None,
 ) -> bytes:
-    """Write a detached-header-free NRRD, `raw` or `gzip` encoded."""
+    """Write a detached-header-free NRRD, `raw` or `gzip` encoded.
+
+    With ``depth`` given, the grid gains a fifth axis of kind ``time``.
+    """
 
     if encoding not in ("raw", "gzip"):
         raise ValueError(f"unsupported NRRD encoding {encoding!r}")
+    if depth is None:
+        depth = len(slices)
+    if len(slices) % depth:
+        raise ValueError("slice count is not a whole number of volumes")
+    frames = len(slices) // depth
+
     payload = _voxels(slices)
     if encoding == "gzip":
         payload = gzip.compress(payload, 9, mtime=0)
+    if frames == 1:
+        dimension, sizes, kinds = 4, f"3 {width} {height} {depth}", (
+            "RGB-color space space space"
+        )
+    else:
+        dimension, sizes, kinds = 5, f"3 {width} {height} {depth} {frames}", (
+            "RGB-color space space space time"
+        )
     header = (
         "NRRD0004\n"
         "# Complete NRRD file format specification at:\n"
         "# http://teem.sourceforge.net/nrrd/format.html\n"
         "type: unsigned char\n"
-        "dimension: 4\n"
-        f"sizes: 3 {width} {height} {len(slices)}\n"
-        "kinds: RGB-color space space space\n"
+        f"dimension: {dimension}\n"
+        f"sizes: {sizes}\n"
+        f"kinds: {kinds}\n"
         "endian: little\n"
         f"encoding: {encoding}\n"
         "space dimension: 3\n"
@@ -152,7 +192,9 @@ def decode_nrrd(data: bytes) -> Tuple[int, int, List[bytes]]:
     sizes = [int(v) for v in fields["sizes"].split()]
     if sizes[0] != 3:
         raise ValueError("expected an RGB-color axis of size 3")
-    _, width, height, depth = sizes
+    width, height, depth = sizes[1], sizes[2], sizes[3]
+    if len(sizes) > 4:
+        depth *= sizes[4]  # time axis: the slices are stored back to back
     payload = data[split + 2 :]
     if fields.get("encoding") == "gzip":
         payload = gzip.decompress(payload)
@@ -165,26 +207,50 @@ def decode_nrrd(data: bytes) -> Tuple[int, int, List[bytes]]:
 
 
 def encode_metaimage(
-    width: int, height: int, slices: Sequence[bytes], compress: bool = True
+    width: int,
+    height: int,
+    slices: Sequence[bytes],
+    compress: bool = True,
+    depth: Optional[int] = None,
 ) -> bytes:
-    """Write a single-file MetaImage volume, optionally zlib-compressed."""
+    """Write a single-file MetaImage volume, optionally zlib-compressed.
+
+    With ``depth`` given the object is written as ``NDims = 4``, ITK's form for
+    a time-varying volume.
+    """
+
+    if depth is None:
+        depth = len(slices)
+    if len(slices) % depth:
+        raise ValueError("slice count is not a whole number of volumes")
+    frames = len(slices) // depth
 
     payload = _voxels(slices)
     body = zlib.compress(payload, 9) if compress else payload
     lines = [
         "ObjectType = Image",
-        "NDims = 3",
+        f"NDims = {3 if frames == 1 else 4}",
         "BinaryData = True",
         "BinaryDataByteOrderMSB = False",
         f"CompressedData = {'True' if compress else 'False'}",
     ]
     if compress:
         lines.append(f"CompressedDataSize = {len(body)}")
+    if frames == 1:
+        lines += [
+            "TransformMatrix = 1 0 0 0 1 0 0 0 1",
+            "Offset = 0 0 0",
+            "ElementSpacing = 1 1 1",
+            f"DimSize = {width} {height} {depth}",
+        ]
+    else:
+        lines += [
+            "TransformMatrix = 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1",
+            "Offset = 0 0 0 0",
+            "ElementSpacing = 1 1 1 1",
+            f"DimSize = {width} {height} {depth} {frames}",
+        ]
     lines += [
-        "TransformMatrix = 1 0 0 0 1 0 0 0 1",
-        "Offset = 0 0 0",
-        "ElementSpacing = 1 1 1",
-        f"DimSize = {width} {height} {len(slices)}",
         "ElementNumberOfChannels = 3",
         "ElementType = MET_UCHAR",
         "ElementDataFile = LOCAL",
@@ -202,7 +268,11 @@ def decode_metaimage(data: bytes) -> Tuple[int, int, List[bytes]]:
     for line in data[:start].decode("ascii").splitlines():
         key, _, value = line.partition(" = ")
         fields[key.strip()] = value.strip()
-    width, height, depth = (int(v) for v in fields["DimSize"].split())
+    extents = [int(v) for v in fields["DimSize"].split()]
+    width, height = extents[0], extents[1]
+    depth = extents[2]
+    for extra in extents[3:]:
+        depth *= extra  # a time axis just adds more slices behind the volume
     payload = data[start + len(marker) :]
     if fields.get("CompressedData") == "True":
         payload = zlib.decompress(payload)
