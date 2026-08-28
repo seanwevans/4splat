@@ -6,6 +6,7 @@
 #   make test-plain   run the test suite against the self-contained build
 #   make bench        size comparison against PNG/GIF/QOI (quick subset)
 #   make bench-full   the whole corpus, every scheme the build carries
+#   make bench-volumes  volumes against NIfTI/NRRD/MetaImage/TIFF stacks
 #   make clean
 #
 # The full-featured build needs the development packages for zlib, bzip2, xz
@@ -18,7 +19,7 @@ CFLAGS ?= -Wall -Wpedantic -std=c11 -O2
 FEATURES ?= -DSPLAT_WITH_ALL
 LIBS ?= -lz -lbz2 -llzma -lbrotlienc -lbrotlidec -lzstd -llz4 -llcms2 -lm
 
-.PHONY: all plain test test-plain bench bench-full fuzz fuzz-standalone clean
+.PHONY: all plain test test-plain bench bench-full bench-volumes fuzz fuzz-standalone clean
 
 all: 4splat
 
@@ -44,6 +45,11 @@ bench: 4splat
 
 bench-full: 4splat
 	python3 tools/benchmark.py --binary ./4splat --schemes all --colors 64
+
+# The volumetric comparison: 3D grids against the containers built for them
+# (NIfTI, NRRD, MetaImage, TIFF stacks) rather than against 2D image formats.
+bench-volumes: 4splat
+	python3 tools/benchmark_volumes.py --binary ./4splat --schemes all --colors 32
 
 # Fuzz the reader with libFuzzer (needs clang and its fuzzer runtime):
 #   make fuzz && ./tests/fuzz_read tests/fuzz_corpus

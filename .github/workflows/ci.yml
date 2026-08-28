@@ -103,18 +103,24 @@ jobs:
             libbrotli-dev libzstd-dev liblz4-dev liblcms2-dev
       - name: Build full-featured binary
         run: make
-      - name: Test the harness and its reference codecs
+      - name: Test the harnesses and their reference codecs
         run: |
           pip install pytest
-          python3 -m pytest tests/test_benchmark.py -q
-      - name: Run the benchmark
+          python3 -m pytest tests/test_benchmark.py tests/test_benchmark_volumes.py -q
+      - name: Run the 2D benchmark
         # Exits non-zero if anything that claims to be lossless fails to decode
         # back to the source pixels, so this doubles as a codec round-trip test.
         run: python3 tools/benchmark.py --schemes all --colors 64 --json benchmark.json
+      - name: Run the volumetric benchmark
+        run: |
+          python3 tools/benchmark_volumes.py --schemes all --colors 32 \
+            --json benchmark-volumes.json
       - uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
-          path: benchmark.json
+          path: |
+            benchmark.json
+            benchmark-volumes.json
 
   fuzz-smoke:
     name: Parser fuzz smoke
