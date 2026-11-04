@@ -53,16 +53,16 @@
 │▒│ │ b            4 bytes     float      blue intensity     │  ├──╯    │▒│
 │▒│ │ alpha        4 bytes     float  ▲   opacity            ├──╯       │▒│
 │▒│ ╰─────────────────────────────────╂──────────────────────╯          │▒│
-│▒│               48 bytes        references                            │▒│
+│▒│               E bytes         references                            │▒│
 │▒╰───────────────────────────────────╂─────────────────────────────────╯▒│
-│▒▒▒▒▒▒▒▒▒▒ 48*PSize bytes ▒▒▒▒▒▒▒▒▒▒▒┃▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
+│▒▒▒▒▒▒▒▒▒▒ E*PSize bytes ▒▒▒▒▒▒▒▒▒▒▒▒┃▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
 │▒▒╭ Index ╮▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒┃▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
 │▒╭╯       ╰──────────────────────────╂─────────────────────────────────╮▒│
 │▒│  ╭───╮╭───╮╭───╮╭───╮╭───╮╭───╮╭──╂╮╭───╮╭───╮╭───╮     ╭───╮╭───╮  │▒│
 │▒│  │ 0 ││ 1 ││ 2 ││ 3 ││ 4 ││ 5 ││ 6┛││ 7 ││ 8 ││ 9 │ ... │I-2││I-1│  │▒│
 │▒│  ╰───╯╰───╯╰───╯╰───╯╰───╯╰───╯╰───╯╰───╯╰───╯╰───╯     ╰───╯╰───╯  │▒│
 │▒╰─────────────────────────────────────────────────────────────────────╯▒│
-│▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ 8*I bytes ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
+│▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ W*I bytes ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
 │▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
 │▒▒╭ Footer ╮▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
 │▒╭╯        ╰───────────────────────────────────────────────────────────╮▒│
@@ -92,7 +92,7 @@
  │▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
  │▒ Offset   Size    Flag            Bin Description                    ▒│
  │▒ ──────────────────────────────────────────────────────────────────  ▒│
- │▒ 0x00     1       ENDIAN            0 Little-Endan                   ▒│
+ │▒ 0x00     1       ENDIAN            0 Little-Endian                  ▒│
  │▒                                    1 Big-Endian                     ▒│
  │▒ 0x01     1       SORTED            0 No                             ▒│
  │▒                                    1 Yes                            ▒│
@@ -105,7 +105,7 @@
  │▒                                 0010 DEFLATE           (Katz, 1993) ▒│
  │▒                                 0011 RAR             (Roshal, 1993) ▒│
  │▒                                 0100 LZO          (Oberhumer, 1994) ▒│
- │▒                                 0101 Zlib      Gaily & Adler, 1995) ▒│
+ │▒                                 0101 Zlib    (Gailly & Adler, 1995) ▒│
  │▒                                 0110 bzip2           (Seward, 1996) ▒│
  │▒                                 0111 LZMA            (Pavlov, 1998) ▒│
  │▒                                 1000 ZPAQ           (Mahoney, 2008) ▒│
@@ -140,7 +140,7 @@
  │▒                                 1101 Rec.601      (ITU-R BT.601-7)  ▒│
  │▒                                 1110 XYZ D50         (ISO 11664-1)  ▒│
  │▒                                 1111 XYZ D65         (ISO 11664-1)  ▒│
- │▒ 0x20     4       INTERPOLATION  0000 None                           ▒│
+ │▒ 0x10     4       INTERPOLATION  0000 None                           ▒│
  │▒                                 0001 Nearest Neighbor               ▒│
  │▒                                 0010 Axis-align (lin/bi/tri/quad)   ▒│
  │▒                                 0011 Smooth (cubic/bi/tri/quad)     ▒│
@@ -152,15 +152,25 @@
  │▒                                 1001 Optical Flow                   ▒│
  │▒                                 1010 Neural                         ▒│
  │▒                                 1011 Akima Splines                  ▒│
- │▒                                 1100 Inverse Distace                ▒│
+ │▒                                 1100 Inverse Distance               ▒│
  │▒                                 1101 Fourier                        ▒│
  │▒                                 1110 Moving Least Squares           ▒│
  │▒                                 1111 Cubic Hermite                  ▒│
- │▒ 0x24     8       METADATA   ???????? Anything                       ▒│
+ │▒ 0x14     4       ENCRYPTION     0000 None                           ▒│
+ │▒                       0001..1111 Rejected on read                   ▒│
+ │▒ 0x18     8       METADATA   ???????? Anything                       ▒│
  │▒▒▒▒▒▒▒▒▒ 4 bytes ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
  │▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│
  ╰───────────────────────────────────────────────────────────────────────╯
 ```
+
+Section sizes in the layout depend on the flags. `E` is the palette entry size:
+the float count set by the splat shape flag times the float width set by the
+precision flag (the Splat4D box shows the 48-byte axis-aligned, float32 case;
+see [Palette layout](#palette-layout-v02)). `W` is the index width flag in
+bytes, and `I = width * height * depth * frames`, so `W*I` is the index size
+before compression. Flag offsets are bit positions within the 32-bit `flags`
+word.
 
 ## Benchmarks
 
